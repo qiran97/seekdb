@@ -1,0 +1,10 @@
+CREATE TABLE t (id BIGINT PRIMARY KEY, category VARCHAR(16), embedding VECTOR(4));
+INSERT INTO t VALUES (1, 'alpha', '[-0.4899,-0.0091,-0.1010,0.3032]');
+SELECT id FROM t;
+INSERT INTO t VALUES (2, 'beta', '[0.7912,0.9465,0.0016,0.9344]');
+SELECT id, category FROM t ORDER BY id;
+DELETE FROM t WHERE id = 3;
+SELECT id, category FROM t ORDER BY id;
+INSERT INTO t VALUES (3, 'beta', '[0.1752,0.7650,0.6924,0.0106]');
+SELECT id, category FROM t ORDER BY id;
+SELECT id, category FROM t WHERE category = 'beta' ORDER BY id LIMIT 1;

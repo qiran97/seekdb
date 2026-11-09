@@ -244,7 +244,10 @@ int compare_candidates(const SortKey* a, size_t a_count, int64_t a_key,
     int result = compare_sort_key(a[i], b[i]);
     if (result != 0) {
       bool ascending = order[i].ascending;
-      return ascending ? -result : result;
+      // A negative result means that `a` is the better candidate: for an
+      // ascending order the smaller key wins, for a descending order the
+      // larger key wins.
+      return ascending ? result : -result;
     }
   }
   if (a_key < b_key) return -1;
@@ -252,12 +255,15 @@ int compare_candidates(const SortKey* a, size_t a_count, int64_t a_key,
   return 0;
 }
 
-// The queue keeps the best candidates; the top of the queue is the worst one.
+// The queue keeps the best candidates; its top is the worst candidate, so
+// that a full queue can drop its top when a better candidate arrives.
 struct CandidateOrder {
   const std::vector<OrderKey>* order = nullptr;
   bool operator()(const Candidate& a, const Candidate& b) const {
+    // A candidate that is better compares smaller, therefore the largest
+    // element of the queue (its top) is the worst candidate.
     return compare_candidates(a.keys.data(), a.keys.size(), a.key, b.keys.data(),
-                              b.keys.size(), b.key, *order) > 0;
+                              b.keys.size(), b.key, *order) < 0;
   }
 };
 

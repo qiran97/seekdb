@@ -235,6 +235,25 @@ Status BTree::read_payload(const uint8_t* page, uint32_t slot_index,
   memcpy(&(*payload)[0], page + offset, length);
   return Status::Ok();
 }
+// Returns the index of the slot with the given key, -1 when the page does
+// not contain the key.
+int BTree::find_slot(const uint8_t* page, uint64_t key) {
+  uint32_t count = leaf_slot_count(page);
+  int64_t low = 0;
+  int64_t high = static_cast<int64_t>(count) - 1;
+  while (low <= high) {
+    int64_t mid = (low + high) / 2;
+    uint64_t mid_key = leaf_slot_key(page, static_cast<uint32_t>(mid));
+    if (mid_key == key) return static_cast<int>(mid);
+    if (mid_key < key) {
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return -1;
+}
+
 Status BTree::write_payload(uint64_t leaf, uint32_t slot_index,
                             const std::string& payload) {
   uint8_t* page = nullptr;
@@ -283,7 +302,16 @@ Status BTree::write_payload(uint64_t leaf, uint32_t slot_index,
   if (heap_top == 0) heap_top = kPageSize;
   uint32_t free_space = heap_top - slots_end;
   if (free_space < length) {
+    // The compaction rebuilds the slot array, the index of the slot has to
+    // be looked up again.
     leaf_compact(page);
+    int position = find_slot(page, key);
+    if (position < 0) {
+      storage_->unpin_page(leaf);
+      return Status::Error(ErrorCode::kStorageCorrupt,
+                           "the row disappeared from its leaf page");
+    }
+    slot_index = static_cast<uint32_t>(position);
     count = leaf_slot_count(page);
     slots_end = kLeafHeaderSize + count * kLeafSlotSize;
     heap_top = leaf_heap_top(page);

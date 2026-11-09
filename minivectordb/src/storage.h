@@ -282,6 +282,7 @@ class BTree {
   Status leaf_insert(uint64_t leaf, uint64_t key, const std::string& payload,
                      bool replace, bool allow_overflow);
   Status write_payload(uint64_t leaf, uint32_t slot_index, const std::string& payload);
+  int find_slot(const uint8_t* page, uint64_t key);
   Status read_payload(const uint8_t* page, uint32_t slot_index, std::string* payload);
 
   Storage* storage_;

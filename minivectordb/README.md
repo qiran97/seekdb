@@ -123,8 +123,9 @@ result terminator `-- MVDB-END --`.
 ## Tests
 
 ```bash
-make test                  # runs tests/run_tests.py against build/minivectordb
+make test                  # runs the fixed cases and the differential test
 python3 tests/run_tests.py --binary build/minivectordb
+python3 tests/fuzz.py --binary build/minivectordb --iterations 400 --seed 1
 make bench                 # runs the performance benchmark
 ```
 
@@ -133,6 +134,10 @@ output.  A case may contain `-- !kill` (the server is killed with `SIGKILL`
 and restarted with the same data directory) or `-- !stop` (the server is
 stopped gracefully and restarted), which is how the crash recovery is
 tested.
+
+`tests/fuzz.py` is a differential test: it generates random statement
+sequences and compares the answers of the database with a reference model
+that implements the same semantics in python.
 
 ## Documentation
 

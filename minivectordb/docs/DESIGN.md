@@ -208,6 +208,10 @@ table and it stops the scan as soon as the heap is full and the candidate
 cannot enter it any more.  Rows with the same distance are ordered by the
 primary key, the same rule is used for the ties of an ordinary `ORDER BY`.
 
+The comparison of two candidates is implemented once (`compare_candidates`)
+and used by the heap and by the sort of an unlimited result, so that both
+paths order the rows in exactly the same way.
+
 The search is exact: the `ann` mode returns the same rows as the `exact`
 mode, which keeps the recall at 1.0.  `CREATE VECTOR INDEX` records the
 index of the vector column in the catalog, the index is maintained by the
@@ -232,7 +236,22 @@ slow `fsync`) the numbers are:
 The write phase is dominated by the two `fdatasync` calls per commit, the
 query phase runs completely from memory.
 
-## 9. Implemented features and known limitations
+## 9. Verification
+
+* `tests/run_tests.py` runs the fixed cases in `tests/cases`.  A case may
+  contain `-- !kill` (the server is killed with `SIGKILL` and restarted with
+  the same data directory) or `-- !stop` (the server is stopped gracefully
+  and restarted), which is how the crash recovery is covered.
+* `tests/fuzz.py` is a differential test: it generates a random sequence of
+  statements, computes the expected answers with a small reference model in
+  python and compares them with the answers of the database.  It found the
+  inverted comparison of the top-k heap, a defect that the fixed cases could
+  not see because their expected files were recorded from the database
+  itself.
+* `tests/bench.py` measures the write and the query phase of the
+  competition workload.
+
+## 10. Implemented features and known limitations
 
 Implemented:
 

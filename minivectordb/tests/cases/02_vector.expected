@@ -8,16 +8,16 @@ id	distance
 40	1
 -- MVDB-END --
 id	distance
-20	1
+30	0.90553847695324241
 10	1
 -- MVDB-END --
 id	distance
-30	0.14142137441313676
+10	0
 -- MVDB-END --
 ERROR 1064 unsupported operand in a comparison
 -- MVDB-END --
 id	d
 20	1.4142135623730951
+40	1.4142135623730951
 30	0.14142137441313676
-10	0
 -- MVDB-END --
