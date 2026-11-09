@@ -126,6 +126,8 @@ result terminator `-- MVDB-END --`.
 make test                  # runs the fixed cases and the differential test
 python3 tests/run_tests.py --binary build/minivectordb
 python3 tests/fuzz.py --binary build/minivectordb --iterations 400 --seed 1
+python3 tests/fuzz.py --binary build/minivectordb --mode txn --iterations 300 --seed 1
+python3 tests/fuzz.py --binary build/minivectordb --mode recover --iterations 80 --seed 1
 make bench                 # runs the performance benchmark
 ```
 
@@ -138,7 +140,9 @@ tested.
 `tests/fuzz.py` is a differential test: it generates random statement
 sequences and compares the answers of the database with a reference model
 that implements the same semantics in python.  `--mode txn` generates random
-transaction sequences and checks the visible state after every statement.
+transaction sequences and checks the visible state after every statement,
+`--mode recover` kills the server in the middle of a random write sequence,
+restarts it and checks that the committed data survived.
 
 ## Documentation
 

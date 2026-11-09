@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 CATEGORIES = ["alpha", "beta", "gamma"]
 DIM = 4
@@ -161,6 +162,114 @@ def run_transactions(binary, rng, iterations):
     return statements, expected, answers
 
 
+def run_recover(binary, rng, iterations):
+    """Kills the server in the middle of a write sequence and checks the state.
+
+    The crash model of the task allows the interrupted statement to be either
+    completely applied or not applied at all, but every committed statement
+    has to survive.  The test therefore accepts the two states that bracket
+    the interrupted statement and rejects everything else.
+    """
+    model = Database()
+    table = "t"
+    statements = []
+    states = []  # the visible state after every statement
+    statements.append(
+        "CREATE TABLE %s (id BIGINT PRIMARY KEY, category VARCHAR(16), "
+        "embedding VECTOR(%d));" % (table, DIM)
+    )
+    model.create(table)
+    states.append(list(model.tables[table]))
+
+    next_key = 1
+    for _ in range(iterations):
+        choice = rng.random()
+        if choice < 0.55:
+            key = next_key
+            next_key += 1
+            category = rng.choice(CATEGORIES)
+            vector = [round(rng.uniform(-1, 1), 4) for _ in range(DIM)]
+            literal = "[" + ",".join("%.4f" % value for value in vector) + "]"
+            statements.append(
+                "INSERT INTO %s VALUES (%d, '%s', '%s');" % (table, key, category, literal)
+            )
+            model.insert(table, key, category, vector)
+        elif choice < 0.75:
+            key = rng.randint(1, max(next_key, 2))
+            statements.append("DELETE FROM %s WHERE id = %d;" % (table, key))
+            model.delete(table, key)
+        else:
+            key = rng.randint(1, max(next_key, 2))
+            category = rng.choice(CATEGORIES)
+            statements.append(
+                "UPDATE %s SET category = '%s' WHERE id = %d;" % (table, category, key)
+            )
+            model.update(table, key, category)
+        states.append(list(model.tables[table]))
+
+    workdir = tempfile.mkdtemp(prefix="mvdb-recover-")
+    data_dir = os.path.join(workdir, "data")
+    os.makedirs(data_dir)
+    try:
+        kill_index = rng.randrange(1, len(statements))
+        process = subprocess.Popen(
+            [binary, "--data-dir", data_dir],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        for index, statement in enumerate(statements):
+            process.stdin.write((statement + "\n").encode("utf-8"))
+            process.stdin.flush()
+            if index == kill_index:
+                # The server is killed while it is working on the statement.
+                time.sleep(0.02)
+                process.kill()
+                break
+            process.stdout.readline()  # the terminator of the answer
+        process.wait(timeout=30)
+
+        # The server is restarted with the same data directory.
+        process = subprocess.Popen(
+            [binary, "--data-dir", data_dir],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        process.stdin.write(
+            ("SELECT id, category FROM %s ORDER BY id;\n" % table).encode("utf-8")
+        )
+        process.stdin.flush()
+        lines = []
+        while True:
+            line = process.stdout.readline()
+            if not line:
+                break
+            text = line.decode("utf-8").rstrip("\n")
+            if text == "-- MVDB-END --":
+                break
+            if text == "MiniVectorDB ready" or text == "id\tcategory":
+                continue
+            lines.append(text)
+        process.stdin.close()
+        process.wait(timeout=30)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    def normalise(rows):
+        return ["%d\t%s" % (row[0], row[1]) for row in sorted(rows)]
+
+    actual = lines
+    # states[i] is the state after the statement i, the killed statement may
+    # or may not have been applied.
+    accepted = []
+    for candidate in (states[kill_index - 1], states[kill_index]):
+        accepted.append(normalise(candidate))
+    if actual in accepted:
+        return True, "the state after the crash matches (%d rows)" % len(actual)
+    return False, "expected one of %r, got %r" % (accepted, actual)
+
+
 def run(binary, statements, workdir):
     """Runs the statements and returns the answers of the database."""
     process = subprocess.Popen(
@@ -192,7 +301,7 @@ def main():
     parser.add_argument("--iterations", type=int, default=200)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--mode", default="basic", choices=["basic", "txn"])
+    parser.add_argument("--mode", default="basic", choices=["basic", "txn", "recover"])
     args = parser.parse_args()
 
     binary = os.path.abspath(args.binary)
@@ -288,6 +397,13 @@ def main():
                 answer.append("%d\t%s" % (key, "%.6f" % distance))
             expected.append(answer)
 
+    if args.mode == "recover":
+        ok, detail = run_recover(binary, rng, args.iterations)
+        if ok:
+            print("PASS: the crash recovery keeps the committed data (%s)" % detail)
+        else:
+            print("FAIL: %s" % detail)
+        return 0 if ok else 1
     if args.mode == "txn":
         statements, expected, answers = run_transactions(binary, rng, args.iterations)
     else:

@@ -252,7 +252,10 @@ query phase runs completely from memory.
   not see because their expected files were recorded from the database
   itself.  The mode `--mode txn` generates random transaction sequences and
   checks the visible state after every statement; it found that a rollback
-  restored the pages but not the in-memory mirror of a table.
+  restored the pages but not the in-memory mirror of a table.  The mode
+  `--mode recover` kills the server in the middle of a random write sequence,
+  restarts it and checks that every committed row survived; the interrupted
+  statement may be applied completely or not at all.
 * `tests/bench.py` measures the write and the query phase of the
   competition workload.
 
