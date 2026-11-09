@@ -1,0 +1,18 @@
+CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR(16), v VECTOR(2));
+INSERT INTO t VALUES (1, 'one', '[1, 0]'), (2, 'two', '[0, 1]');
+BEGIN;
+INSERT INTO t VALUES (3, 'three', '[1, 1]');
+UPDATE t SET name = 'ONE' WHERE id = 1;
+DELETE FROM t WHERE id = 2;
+SELECT id, name FROM t ORDER BY id;
+COMMIT;
+SELECT id, name FROM t ORDER BY id;
+BEGIN;
+UPDATE t SET name = 'x' WHERE id = 1;
+DELETE FROM t WHERE id = 3;
+ROLLBACK;
+SELECT id, name FROM t ORDER BY id;
+BEGIN;
+INSERT INTO t VALUES (4, 'four', '[2, 2]');
+ROLLBACK;
+SELECT id FROM t ORDER BY id;

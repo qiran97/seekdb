@@ -1,0 +1,42 @@
+MiniVectorDB ready
+-- MVDB-END --
+-- MVDB-END --
+id
+1
+4
+-- MVDB-END --
+id
+3
+4
+-- MVDB-END --
+id
+2
+1
+-- MVDB-END --
+id
+1
+-- MVDB-END --
+id
+3
+4
+-- MVDB-END --
+id
+2
+3
+-- MVDB-END --
+id
+1
+3
+4
+-- MVDB-END --
+id
+2
+4
+-- MVDB-END --
+id
+2
+3
+4
+-- MVDB-END --
+ERROR 1064 vector column 'v' cannot be used in a comparison
+-- MVDB-END --

@@ -1,0 +1,12 @@
+CREATE TABLE docs (id BIGINT PRIMARY KEY, category VARCHAR(32), content VARCHAR(256), embedding VECTOR(4));
+INSERT INTO docs VALUES (1, 'a', 'one', '[1, 0, 0, 0]'), (2, 'b', 'two', '[0, 1, 0, 0]');
+CREATE VECTOR INDEX idx_docs_embedding ON docs(embedding);
+SELECT id FROM docs ORDER BY id;
+INSERT INTO docs VALUES (3, 'a', 'three', '[0, 0, 1, 0]');
+SELECT id, L2_DISTANCE(embedding, '[1, 0, 0, 0]') AS d FROM docs ORDER BY d;
+UPDATE docs SET embedding = '[1, 0, 0, 0]' WHERE id = 3;
+SELECT id, L2_DISTANCE(embedding, '[1, 0, 0, 0]') AS d FROM docs ORDER BY d;
+DELETE FROM docs WHERE id = 2;
+SELECT id, L2_DISTANCE(embedding, '[1, 0, 0, 0]') AS d FROM docs ORDER BY d;
+CREATE VECTOR INDEX idx_docs_embedding ON docs(embedding);
+DROP VECTOR INDEX idx_docs_embedding;

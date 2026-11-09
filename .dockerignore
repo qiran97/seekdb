@@ -1,0 +1,5 @@
+# Build artefacts and local scratch space are not part of the image.
+minivectordb/build/
+minivectordb/tests/__pycache__/
+**/*.pyc
+.git/

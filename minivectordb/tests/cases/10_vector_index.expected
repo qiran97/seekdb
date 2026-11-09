@@ -1,0 +1,28 @@
+MiniVectorDB ready
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+id
+1
+2
+-- MVDB-END --
+-- MVDB-END --
+id	d
+1	0
+2	1.4142135623730951
+3	1.4142135623730951
+-- MVDB-END --
+-- MVDB-END --
+id	d
+1	0
+3	0
+2	1.4142135623730951
+-- MVDB-END --
+-- MVDB-END --
+id	d
+1	0
+3	0
+-- MVDB-END --
+ERROR 1050 table 'docs' already has a vector index
+-- MVDB-END --
+-- MVDB-END --

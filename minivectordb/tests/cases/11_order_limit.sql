@@ -1,0 +1,12 @@
+CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR(16), v VECTOR(2));
+INSERT INTO t VALUES (1, 'a', '[1, 0]'), (2, 'b', '[0, 1]'), (3, 'c', '[1, 1]'), (4, 'd', '[0, 0]');
+SELECT id FROM t ORDER BY id LIMIT 2;
+SELECT id FROM t ORDER BY id LIMIT 2 OFFSET 2;
+SELECT id FROM t ORDER BY id DESC LIMIT 2;
+SELECT id FROM t ORDER BY id DESC LIMIT 1 OFFSET 1;
+SELECT id FROM t WHERE id > 2 ORDER BY id;
+SELECT id FROM t WHERE id >= 2 AND id < 4 ORDER BY id;
+SELECT id FROM t WHERE name <> 'b' ORDER BY id;
+SELECT id FROM t WHERE name = 'b' OR id = 4 ORDER BY id;
+SELECT id FROM t WHERE NOT (id = 1) ORDER BY id;
+SELECT id FROM t WHERE v = '[1, 0]' ORDER BY id;

@@ -1,0 +1,57 @@
+MiniVectorDB ready
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+id
+1
+2
+5000
+-- MVDB-END --
+id
+3
+2
+1
+-- MVDB-END --
+id	d
+18	1.5498632986022503
+11	1.7433244903855611
+508	2.1883493137090877
+-- MVDB-END --
+__mvdb_sync__
+__mvdb_sync__
+-- MVDB-END --
+MiniVectorDB ready
+id
+1
+2
+5000
+-- MVDB-END --
+id
+3
+2
+1
+-- MVDB-END --
+id	d
+18	1.5498632986022503
+11	1.7433244903855611
+508	2.1883493137090877
+-- MVDB-END --

@@ -1,0 +1,35 @@
+MiniVectorDB ready
+-- MVDB-END --
+-- MVDB-END --
+id	category	content
+1	database	transaction
+2	database	index
+3	travel	guide
+4	database	recovery
+-- MVDB-END --
+id	category	content	embedding
+1	database	transaction	[1, 0, 0, 0]
+2	database	index	[0, 1, 0, 0]
+4	database	recovery	[0, 0, 0, 1]
+-- MVDB-END --
+id
+3
+4
+-- MVDB-END --
+id	content
+1	transaction
+3	guide
+-- MVDB-END --
+-- MVDB-END --
+id	content
+1	transaction
+2	changed
+3	guide
+4	recovery
+-- MVDB-END --
+-- MVDB-END --
+id
+1
+2
+3
+-- MVDB-END --

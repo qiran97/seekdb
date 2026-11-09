@@ -1,0 +1,29 @@
+MiniVectorDB ready
+-- MVDB-END --
+ERROR 1146 table 'missing_table' does not exist
+-- MVDB-END --
+-- MVDB-END --
+ERROR 1062 duplicate primary key value
+-- MVDB-END --
+ERROR 1525 vector dimension mismatch: expected 2, got 3
+-- MVDB-END --
+ERROR 1416 vector element is not a finite number: nan
+-- MVDB-END --
+ERROR 1416 vector element is not a finite number: inf
+-- MVDB-END --
+ERROR 1416 vector element overflows float32: 1e40
+-- MVDB-END --
+ERROR 1054 unknown column 'unknown_column'
+-- MVDB-END --
+ERROR 1054 unknown column 'unknown_alias' in 't'
+-- MVDB-END --
+-- MVDB-END --
+id	name
+1	a
+6	c
+-- MVDB-END --
+ERROR 1235 updating the primary key is not supported
+-- MVDB-END --
+-- MVDB-END --
+ERROR 1064 unsupported function: COUNT
+-- MVDB-END --

@@ -1,0 +1,12 @@
+MiniVectorDB ready
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+ERROR 1062 duplicate primary key value
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+id	name
+1	one
+2	two
+-- MVDB-END --

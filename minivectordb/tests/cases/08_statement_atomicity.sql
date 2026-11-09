@@ -1,0 +1,7 @@
+CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR(16), v VECTOR(2));
+BEGIN;
+INSERT INTO t VALUES (1, 'one', '[1, 0]');
+INSERT INTO t VALUES (1, 'dup', '[0, 1]');
+INSERT INTO t VALUES (2, 'two', '[0, 1]');
+COMMIT;
+SELECT id, name FROM t ORDER BY id;

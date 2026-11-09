@@ -1,0 +1,15 @@
+CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR(16), v VECTOR(2));
+SELECT * FROM missing_table;
+INSERT INTO t VALUES (1, 'a', '[1, 0]');
+INSERT INTO t VALUES (1, 'b', '[1, 0]');
+INSERT INTO t VALUES (2, 'b', '[1, 0, 0]');
+INSERT INTO t VALUES (3, 'b', '[1, nan]');
+INSERT INTO t VALUES (4, 'b', '[1, inf]');
+INSERT INTO t VALUES (5, 'b', '[1e40, 0]');
+SELECT id FROM t WHERE unknown_column = 1;
+SELECT id FROM t ORDER BY unknown_alias;
+INSERT INTO t (id, name) VALUES (6, 'c');
+SELECT id, name FROM t ORDER BY id;
+UPDATE t SET id = 7 WHERE id = 6;
+DELETE FROM t WHERE id = 999;
+SELECT COUNT(*) FROM t;

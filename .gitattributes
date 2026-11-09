@@ -10,3 +10,7 @@
 *.i filter=codeformat
 *.ic filter=codeformat
 *.js filter=codeformat
+
+# Keep the shell scripts and the python helpers with unix line endings.
+*.sh text eol=lf
+*.py text eol=lf

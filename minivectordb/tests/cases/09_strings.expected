@@ -1,0 +1,24 @@
+MiniVectorDB ready
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+id	name
+3	
+2	ascii
+1	zhongwen
+-- MVDB-END --
+id
+1
+-- MVDB-END --
+id
+1
+2
+-- MVDB-END --
+-- MVDB-END --
+id
+1
+2
+3
+4
+-- MVDB-END --

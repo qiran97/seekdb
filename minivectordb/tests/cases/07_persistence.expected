@@ -1,0 +1,15 @@
+MiniVectorDB ready
+-- MVDB-END --
+-- MVDB-END --
+__mvdb_sync__
+__mvdb_sync__
+-- MVDB-END --
+MiniVectorDB ready
+id	name
+1	one
+-- MVDB-END --
+-- MVDB-END --
+id
+1
+2
+-- MVDB-END --
