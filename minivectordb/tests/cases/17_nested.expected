@@ -1,0 +1,11 @@
+MiniVectorDB ready
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+ERROR 1568 a transaction is already active
+-- MVDB-END --
+-- MVDB-END --
+id	category
+1	alpha
+-- MVDB-END --

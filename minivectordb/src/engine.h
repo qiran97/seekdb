@@ -155,15 +155,6 @@ class Engine {
   void cache_update(Table* table, int64_t key, const RowValues& row);
   void cache_remove(Table* table, int64_t key);
   size_t cache_budget_ = 0;
-  // Undo information for the in-memory row cache, used to roll a failed
-  // statement back.
-  struct CacheChange {
-    uint32_t table_id = 0;
-    int64_t key = 0;
-    bool existed = false;
-    RowValues old_row;
-  };
-  std::vector<CacheChange> cache_changes_;
   uint64_t txn_start_position_ = 0;
 
   Storage storage_;

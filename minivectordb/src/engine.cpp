@@ -313,7 +313,6 @@ Status Engine::begin_transaction(uint64_t txn_id) {
   in_transaction_ = true;
   current_txn_id_ = txn_id;
   storage_.begin_transaction(txn_id);
-  cache_changes_.clear();
   return Status::Ok();
 }
 
@@ -322,7 +321,6 @@ Status Engine::begin_statement(uint64_t* savepoint) {
   if (!status.ok()) return status;
   *savepoint = storage_.undo_log()->position();
   storage_.reset_logged_pages();
-  cache_changes_.clear();
   return Status::Ok();
 }
 
@@ -338,8 +336,7 @@ Status Engine::commit_transaction() {
     storage_.end_transaction();
     current_txn_id_ = 0;
     in_transaction_ = false;
-    cache_changes_.clear();
-    return Status::Ok();
+      return Status::Ok();
   }
   storage_.set_last_committed_txn(current_txn_id_);
   Status status = storage_.store_db_header();
@@ -361,7 +358,6 @@ Status Engine::commit_transaction() {
   storage_.end_transaction();
   current_txn_id_ = 0;
   in_transaction_ = false;
-  cache_changes_.clear();
   return Status::Ok();
 }
 
@@ -386,23 +382,20 @@ Status Engine::rollback_to(uint64_t savepoint) {
     status = apply_undo(records[i]);
     if (!status.ok()) return status;
   }
+  log_info("rollback: savepoint=%llu records=%zu log=%llu", (unsigned long long)savepoint,
+           records.size(), (unsigned long long)storage_.undo_log()->position());
   status = storage_.undo_log()->truncate_to(savepoint);
   if (!status.ok()) return status;
-  // Restore the in-memory row cache.
-  for (size_t i = cache_changes_.size(); i-- > 0;) {
-    const CacheChange& change = cache_changes_[i];
-    for (auto& entry : tables_) {
-      if (entry.second->id != change.table_id) continue;
-      Table* table = entry.second.get();
-      if (!table->cache_enabled) break;
-      if (change.existed) {
-        table->cache[change.key] = change.old_row;
-      } else {
-        table->cache.erase(change.key);
-      }
-    }
+  // The in-memory mirror of a table cannot be restored selectively: it may
+  // have been built in the middle of the transaction and it does not know
+  // about the changes that happened before it existed.  The mirror is
+  // therefore dropped and rebuilt from the restored pages on the next query.
+  for (auto& entry : tables_) {
+    Table* table = entry.second.get();
+    if (!table->cache_enabled) continue;
+    drop_cache(table);
+    table->cache_stale = true;
   }
-  cache_changes_.clear();
   return Status::Ok();
 }
 
@@ -665,13 +658,6 @@ Status Engine::insert_row(Table* table, const RowValues& row) {
   if (table->root_page != table->tree.root_page()) {
     table->root_page = table->tree.root_page();
   }
-  if (table->cache_enabled) {
-    CacheChange change;
-    change.table_id = table->id;
-    change.key = row.key;
-    change.existed = false;
-    cache_changes_.push_back(change);
-  }
   cache_insert(table, row);
   return Status::Ok();
 }
@@ -686,15 +672,6 @@ Status Engine::update_row(Table* table, int64_t key, const RowValues& row) {
     table->root_page = table->tree.root_page();
     catalog_dirty_ = true;
   }
-  if (table->cache_enabled) {
-    CacheChange change;
-    change.table_id = table->id;
-    change.key = key;
-    auto it = table->cache.find(key);
-    change.existed = it != table->cache.end();
-    if (change.existed) change.old_row = it->second;
-    cache_changes_.push_back(change);
-  }
   cache_update(table, key, row);
   return Status::Ok();
 }
@@ -704,15 +681,6 @@ Status Engine::delete_row(Table* table, int64_t key) {
   if (!status.ok()) return status;
   if (table->row_count > 0) --table->row_count;
   catalog_dirty_ = true;
-  if (table->cache_enabled) {
-    CacheChange change;
-    change.table_id = table->id;
-    change.key = key;
-    auto it = table->cache.find(key);
-    change.existed = it != table->cache.end();
-    if (change.existed) change.old_row = it->second;
-    cache_changes_.push_back(change);
-  }
   cache_remove(table, key);
   return Status::Ok();
 }
@@ -849,8 +817,7 @@ Status Engine::execute(const Statement& statement, ResultSet* result) {
       storage_.end_transaction();
       current_txn_id_ = 0;
       in_transaction_ = false;
-      cache_changes_.clear();
-      return Status::Ok();
+          return Status::Ok();
     }
     case StatementType::kSet: {
       std::string name = to_lower(statement.name);

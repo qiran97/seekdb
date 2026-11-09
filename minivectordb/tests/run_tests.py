@@ -126,9 +126,11 @@ def run_case(binary, case_path, update=False):
                 process, collected, thread = spawn()
                 continue
         process.stdin.close()
-        process.wait(timeout=60)
+        returncode = process.wait(timeout=60)
         thread.join(timeout=10)
         output.append(b"".join(collected).decode("utf-8", "replace"))
+        if returncode != 0:
+            return False, "the server exited with code %d" % returncode
     finally:
         try:
             if process.poll() is None:

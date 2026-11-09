@@ -137,7 +137,8 @@ tested.
 
 `tests/fuzz.py` is a differential test: it generates random statement
 sequences and compares the answers of the database with a reference model
-that implements the same semantics in python.
+that implements the same semantics in python.  `--mode txn` generates random
+transaction sequences and checks the visible state after every statement.
 
 ## Documentation
 

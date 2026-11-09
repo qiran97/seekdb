@@ -34,6 +34,30 @@ class Database:
     def __init__(self):
         self.tables = {}
         self.transactions = []
+        self.committed = None
+        self.in_transaction = False
+
+    def begin(self):
+        if self.in_transaction:
+            return ["ERROR 1568 a transaction is already active"]
+        self.committed = {name: list(rows) for name, rows in self.tables.items()}
+        self.in_transaction = True
+        return []
+
+    def commit(self):
+        if not self.in_transaction:
+            return []
+        self.in_transaction = False
+        self.committed = None
+        return []
+
+    def rollback(self):
+        if not self.in_transaction:
+            return []
+        self.tables = {name: list(rows) for name, rows in self.committed.items()}
+        self.in_transaction = False
+        self.committed = None
+        return []
 
     def create(self, name):
         if name in self.tables:
@@ -42,6 +66,8 @@ class Database:
         return []
 
     def insert(self, name, key, category, vector):
+        if self.in_transaction and self.committed is not None:
+            pass
         rows = self.tables[name]
         for row in rows:
             if row[0] == key:
@@ -70,6 +96,69 @@ class Database:
         if limit is not None:
             rows = rows[:limit]
         return rows
+
+
+def run_transactions(binary, rng, iterations):
+    """Drives random transactions and compares the visible state."""
+    model = Database()
+    statements = []
+    expected = []
+    table = "t"
+    statements.append(
+        "CREATE TABLE %s (id BIGINT PRIMARY KEY, category VARCHAR(16), "
+        "embedding VECTOR(%d));" % (table, DIM)
+    )
+    expected.append(model.create(table))
+    next_key = 1
+
+    for _ in range(iterations):
+        choice = rng.random()
+        if choice < 0.15:
+            statements.append("BEGIN;")
+            expected.append(model.begin())
+        elif choice < 0.30:
+            statements.append("COMMIT;")
+            expected.append(model.commit())
+        elif choice < 0.42:
+            statements.append("ROLLBACK;")
+            expected.append(model.rollback())
+        elif choice < 0.62:
+            key = next_key
+            next_key += 1
+            category = rng.choice(CATEGORIES)
+            vector = [round(rng.uniform(-1, 1), 4) for _ in range(DIM)]
+            literal = "[" + ",".join("%.4f" % value for value in vector) + "]"
+            statements.append(
+                "INSERT INTO %s VALUES (%d, '%s', '%s');" % (table, key, category, literal)
+            )
+            expected.append(model.insert(table, key, category, vector))
+        elif choice < 0.72:
+            key = rng.randint(1, max(next_key, 2))
+            category = rng.choice(CATEGORIES)
+            statements.append(
+                "UPDATE %s SET category = '%s' WHERE id = %d;" % (table, category, key)
+            )
+            expected.append(model.update(table, key, category))
+        elif choice < 0.80:
+            key = rng.randint(1, max(next_key, 2))
+            statements.append("DELETE FROM %s WHERE id = %d;" % (table, key))
+            expected.append(model.delete(table, key))
+        else:
+            pass
+        # The visible state is checked after every statement.
+        statements.append("SELECT id, category FROM %s ORDER BY id;" % table)
+        rows = model.select(table, None, None)
+        answer = ["id\tcategory"]
+        for row in rows:
+            answer.append("%d\t%s" % (row[0], row[1]))
+        expected.append(answer)
+
+    workdir = tempfile.mkdtemp(prefix="mvdb-txn-")
+    try:
+        answers = run(binary, statements, workdir)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+    return statements, expected, answers
 
 
 def run(binary, statements, workdir):
@@ -103,6 +192,7 @@ def main():
     parser.add_argument("--iterations", type=int, default=200)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--mode", default="basic", choices=["basic", "txn"])
     args = parser.parse_args()
 
     binary = os.path.abspath(args.binary)
@@ -198,11 +288,14 @@ def main():
                 answer.append("%d\t%s" % (key, "%.6f" % distance))
             expected.append(answer)
 
-    workdir = tempfile.mkdtemp(prefix="mvdb-fuzz-")
-    try:
-        answers = run(binary, statements, workdir)
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+    if args.mode == "txn":
+        statements, expected, answers = run_transactions(binary, rng, args.iterations)
+    else:
+        workdir = tempfile.mkdtemp(prefix="mvdb-fuzz-")
+        try:
+            answers = run(binary, statements, workdir)
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
 
     failures = 0
     if len(answers) != len(expected):

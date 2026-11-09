@@ -145,7 +145,10 @@ not force a single disk write.
 A statement that fails inside a transaction is rolled back to the savepoint
 that was taken when the statement started: the before images of the pages
 that the statement touched are written back and the undo log is truncated to
-the savepoint.  A multi row `INSERT` whose second row violates the primary
+the savepoint.  The in-memory mirror of the tables is dropped by a rollback
+and rebuilt from the restored pages on the next query, because the mirror can
+be built in the middle of a transaction and would not know about the changes
+that happened before it existed.  A multi row `INSERT` whose second row violates the primary
 key therefore leaves no row behind, which is verified by the test case
 `tests/cases/08_statement_atomicity.sql`.  A `ROLLBACK` of the whole transaction uses the position of
 the log at the beginning of the transaction.
@@ -247,7 +250,9 @@ query phase runs completely from memory.
   python and compares them with the answers of the database.  It found the
   inverted comparison of the top-k heap, a defect that the fixed cases could
   not see because their expected files were recorded from the database
-  itself.
+  itself.  The mode `--mode txn` generates random transaction sequences and
+  checks the visible state after every statement; it found that a rollback
+  restored the pages but not the in-memory mirror of a table.
 * `tests/bench.py` measures the write and the query phase of the
   competition workload.
 
