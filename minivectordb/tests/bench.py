@@ -127,7 +127,7 @@ def main():
         process.stdout.readline()  # terminator of the CREATE TABLE answer
         io_start = io_counters(pid)
 
-        write_start = time.time()
+        write_start = time.monotonic()
         batches = 0
         for begin in range(0, args.rows, args.batch):
             chunk = rows[begin:begin + args.batch]
@@ -139,10 +139,10 @@ def main():
             if batches % 10 == 0:
                 sys.stderr.write("  batch %d/%d\n" % (batches, (args.rows + args.batch - 1) // args.batch))
                 sys.stderr.flush()
-        write_time = time.time() - write_start
+        write_time = time.monotonic() - write_start
         io_write = io_counters(pid)
 
-        query_start = time.time()
+        query_start = time.monotonic()
         for index, statement in enumerate(queries):
             if index % 100 == 0:
                 sys.stderr.write("  query %d/%d\n" % (index, len(queries)))
@@ -153,7 +153,7 @@ def main():
             for _ in range(TOPK):
                 process.stdout.readline()
             process.stdout.readline()
-        query_time = time.time() - query_start
+        query_time = time.monotonic() - query_start
         io_query = io_counters(pid)
         peak = peak_rss_kb(pid)
 

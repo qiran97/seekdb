@@ -211,7 +211,7 @@ Status BTree::read_payload(const uint8_t* page, uint32_t slot_index,
   uint32_t flags = leaf_slot_flags(page, slot_index);
   uint32_t length = leaf_slot_length(page, slot_index);
   uint32_t offset = leaf_slot_offset(page, slot_index);
-  payload->assign(length, '\0');
+  payload->clear();
   if (length == 0) return Status::Ok();
   if (flags & kSlotOverflow) {
     uint64_t next = offset;
@@ -232,7 +232,7 @@ Status BTree::read_payload(const uint8_t* page, uint32_t slot_index,
     }
     return Status::Ok();
   }
-  memcpy(&(*payload)[0], page + offset, length);
+  payload->append(reinterpret_cast<const char*>(page + offset), length);
   return Status::Ok();
 }
 // Returns the index of the slot with the given key, -1 when the page does

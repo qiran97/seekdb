@@ -129,7 +129,12 @@ python3 tests/fuzz.py --binary build/minivectordb --iterations 400 --seed 1
 python3 tests/fuzz.py --binary build/minivectordb --mode txn --iterations 300 --seed 1
 python3 tests/fuzz.py --binary build/minivectordb --mode recover --iterations 80 --seed 1
 make bench                 # runs the performance benchmark
+python3 tests/large_data.py --binary build/minivectordb --rows 100000
 ```
+
+`tests/large_data.py` writes a data set that is bigger than the memory
+budget and checks that the peak memory stays small and that the data
+survives a restart.
 
 `tests/cases` contains mysqltest style cases together with their expected
 output.  A case may contain `-- !kill` (the server is killed with `SIGKILL`

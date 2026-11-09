@@ -230,11 +230,26 @@ slow `fsync`) the numbers are:
 
 | Metric | Value |
 | --- | --- |
-| write phase | 0.60 s for 10,000 rows (16,700 rows/s) |
+| write phase | 0.71 s for 10,000 rows (14,000 rows/s) |
 | write I/O | 23.7 MiB |
-| query phase | 1.03 s for 1,000 top-k queries (970 queries/s) |
+| query phase | 0.70 s for 1,000 top-k queries (1,430 queries/s) |
 | query I/O | 0 MiB |
 | peak RSS | 21 MiB |
+
+The write phase is dominated by the two `fdatasync` calls per commit, the
+query phase runs completely from memory.  The query path was optimised by
+measuring the cost of the individual query shapes:
+
+| Query shape (10,000 rows, 128 dimensions) | before | after |
+| --- | --- | --- |
+| scan + integer key + top-k | 0.57 ms | 0.24 ms |
+| scan + filter + integer key + top-k | 0.81 ms | 0.45 ms |
+| scan + distance + top-k | 0.60 ms | 0.48 ms |
+
+The scan itself was the dominant cost, not the distance kernel: a query with
+a single numeric sort key and a limit is now executed by a specialised loop
+that computes the key directly, and the common filter shapes are evaluated
+without the generic operand handling.
 
 The write phase is dominated by the two `fdatasync` calls per commit, the
 query phase runs completely from memory.
@@ -258,6 +273,11 @@ query phase runs completely from memory.
   statement may be applied completely or not at all.
 * `tests/bench.py` measures the write and the query phase of the
   competition workload.
+* `tests/large_data.py` writes a data set that is bigger than the memory
+  budget (100,000 rows with 128 dimensional vectors are 48.8 MiB of vector
+  payload) into a database with a 16 MiB cache budget and an 8 MiB buffer
+  pool.  The peak resident set size stays at 15.2 MiB while the queries
+  stream the data through the buffer pool, and the rows survive a restart.
 
 ## 10. Implemented features and known limitations
 

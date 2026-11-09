@@ -58,7 +58,9 @@ Status resolve_operand(const Expr& expr, const TableDef& def,
 struct OperandValue {
   bool numeric = false;
   int64_t number = 0;
-  std::string text;
+  // The text is a view on the row, comparing it must not copy the value.
+  const std::string* text = nullptr;
+  std::string empty;
 };
 
 int64_t leading_number(const std::string& text) {
@@ -97,7 +99,7 @@ OperandValue operand_value(const ScalarOperand& operand, const TableDef& def,
       return value;
     case ScalarOperand::Kind::kText:
       value.numeric = false;
-      value.text = operand.text;
+      value.text = &operand.text;
       return value;
     case ScalarOperand::Kind::kColumn: {
       if (operand.column == def.pk_index) {
@@ -108,7 +110,8 @@ OperandValue operand_value(const ScalarOperand& operand, const TableDef& def,
       int position = value_position(def, operand.column);
       if (position < 0 || position >= static_cast<int>(row.strings.size())) {
         value.numeric = false;
-        value.text.clear();
+        value.empty.clear();
+        value.text = &value.empty;
         return value;
       }
       const std::string& text = row.strings[position];
@@ -118,7 +121,7 @@ OperandValue operand_value(const ScalarOperand& operand, const TableDef& def,
         return value;
       }
       value.numeric = false;
-      value.text = text;
+      value.text = &text;
       return value;
     }
   }
@@ -133,17 +136,17 @@ int compare_operands(const ScalarOperand& left_operand,
   OperandValue right = operand_value(right_operand, def, row);
   if (left.numeric && !right.numeric) {
     right.numeric = true;
-    right.number = leading_number(right.text);
+    right.number = leading_number(*right.text);
   } else if (!left.numeric && right.numeric) {
     left.numeric = true;
-    left.number = leading_number(left.text);
+    left.number = leading_number(*left.text);
   }
   if (left.numeric && right.numeric) {
     if (left.number < right.number) return -1;
     if (left.number > right.number) return 1;
     return 0;
   }
-  int result = left.text.compare(right.text);
+  int result = left.text->compare(*right.text);
   if (result < 0) return -1;
   if (result > 0) return 1;
   return 0;

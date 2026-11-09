@@ -74,6 +74,13 @@ class BufReader {
     pos_ += length;
     return true;
   }
+  // Reads a block of bytes, used for the float32 vectors.
+  bool bytes(uint32_t length, void* target) {
+    if (pos_ + length > size_) return fail();
+    memcpy(target, data_ + pos_, length);
+    pos_ += length;
+    return true;
+  }
   bool ok() const { return ok_; }
 
  private:
@@ -573,27 +580,21 @@ Status Engine::decode_row(const Table& table, const std::string& payload,
   if (!reader.u32(&value_count)) {
     return Status::Error(ErrorCode::kStorageCorrupt, "row payload is corrupted");
   }
-  out->strings.clear();
+  // The buffers of the caller are reused, a scan over a big table must not
+  // allocate for every row.
+  out->strings.resize(value_count);
   for (uint32_t i = 0; i < value_count; ++i) {
-    std::string value;
-    if (!reader.str(&value)) {
+    if (!reader.str(&out->strings[i])) {
       return Status::Error(ErrorCode::kStorageCorrupt, "row payload is corrupted");
     }
-    out->strings.push_back(std::move(value));
   }
   uint32_t dim = 0;
   if (!reader.u32(&dim)) {
     return Status::Error(ErrorCode::kStorageCorrupt, "row payload is corrupted");
   }
-  out->vector.clear();
-  for (uint32_t i = 0; i < dim; ++i) {
-    uint32_t bits = 0;
-    if (!reader.u32(&bits)) {
-      return Status::Error(ErrorCode::kStorageCorrupt, "row payload is corrupted");
-    }
-    float value = 0.0f;
-    memcpy(&value, &bits, sizeof(value));
-    out->vector.push_back(value);
+  out->vector.resize(dim);
+  if (dim > 0 && !reader.bytes(dim * sizeof(float), out->vector.data())) {
+    return Status::Error(ErrorCode::kStorageCorrupt, "row payload is corrupted");
   }
   return Status::Ok();
 }
@@ -731,9 +732,9 @@ Status Engine::scan_rows(Table* table, const RowVisitor& visitor) {
     }
     return Status::Ok();
   }
-  std::string payload;
+  // The row and its buffers are reused for every row of the scan.
+  RowValues row;
   Status status = table->tree.scan([&](uint64_t key, const std::string& data) {
-    RowValues row;
     row.key = static_cast<int64_t>(key);
     Status decode_status = decode_row(*table, data, &row);
     if (!decode_status.ok()) return false;

@@ -16,7 +16,7 @@ OBJECTS  := $(patsubst $(SRC_DIR)/%.cpp,$(OBJ_DIR)/%.o,$(SOURCES))
 DEPS     := $(OBJECTS:.o=.d)
 TARGET   := $(BUILD)/minivectordb
 
-.PHONY: all test bench clean
+.PHONY: all test bench large clean
 
 all: $(TARGET)
 
@@ -37,6 +37,9 @@ test: $(TARGET)
 
 bench: $(TARGET)
 	python3 tests/bench.py --binary $(TARGET)
+
+large: $(TARGET)
+	python3 tests/large_data.py --binary $(TARGET) --rows 100000
 
 clean:
 	rm -rf $(BUILD)
