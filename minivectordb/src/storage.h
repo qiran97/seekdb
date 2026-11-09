@@ -280,7 +280,7 @@ class BTree {
   Status split_leaf(uint64_t leaf, uint64_t* right_leaf, uint64_t* separator);
   Status split_internal(uint64_t page, uint64_t* right_page, uint64_t* separator);
   Status leaf_insert(uint64_t leaf, uint64_t key, const std::string& payload,
-                     bool replace);
+                     bool replace, bool allow_overflow);
   Status write_payload(uint64_t leaf, uint32_t slot_index, const std::string& payload);
   Status read_payload(const uint8_t* page, uint32_t slot_index, std::string* payload);
 

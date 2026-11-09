@@ -375,8 +375,12 @@ Status Engine::apply_undo(const UndoRecord& record) {
 }
 
 Status Engine::rollback_to(uint64_t savepoint) {
+  // The undo records of the statement may still be in the write buffer of the
+  // log, they have to reach the file before they can be read back.
+  Status status = storage_.flush_undo_log();
+  if (!status.ok()) return status;
   std::vector<UndoRecord> records;
-  Status status = storage_.undo_log()->records_from(savepoint, &records);
+  status = storage_.undo_log()->records_from(savepoint, &records);
   if (!status.ok()) return status;
   for (size_t i = records.size(); i-- > 0;) {
     status = apply_undo(records[i]);
@@ -656,10 +660,10 @@ Status Engine::insert_row(Table* table, const RowValues& row) {
   status = table->tree.insert(static_cast<uint64_t>(row.key), payload);
   if (!status.ok()) return status;
   ++table->row_count;
+  // The catalog stores the row count and the root page of the table.
+  catalog_dirty_ = true;
   if (table->root_page != table->tree.root_page()) {
     table->root_page = table->tree.root_page();
-    // The root of the tree moved, the catalog has to record the new page.
-    catalog_dirty_ = true;
   }
   if (table->cache_enabled) {
     CacheChange change;

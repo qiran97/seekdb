@@ -28,6 +28,9 @@ class StatementReader {
   void append(const std::string& text) { buffer_ += text; }
   bool next(std::string* statement);
   bool flush(std::string* statement);
+  // The text that was received but does not contain a statement terminator.
+  bool pending(std::string* text) const;
+  void consume_pending();
 
  private:
   std::string buffer_;

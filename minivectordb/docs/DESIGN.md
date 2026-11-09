@@ -145,7 +145,9 @@ not force a single disk write.
 A statement that fails inside a transaction is rolled back to the savepoint
 that was taken when the statement started: the before images of the pages
 that the statement touched are written back and the undo log is truncated to
-the savepoint.  A `ROLLBACK` of the whole transaction uses the position of
+the savepoint.  A multi row `INSERT` whose second row violates the primary
+key therefore leaves no row behind, which is verified by the test case
+`tests/cases/08_statement_atomicity.sql`.  A `ROLLBACK` of the whole transaction uses the position of
 the log at the beginning of the transaction.
 
 The in memory mirror of a table (see section 6) is updated in step with the
@@ -221,9 +223,9 @@ slow `fsync`) the numbers are:
 
 | Metric | Value |
 | --- | --- |
-| write phase | 0.74 s for 10,000 rows (13,500 rows/s) |
-| write I/O | 22.6 MiB |
-| query phase | 1.02 s for 1,000 top-k queries (980 queries/s) |
+| write phase | 0.60 s for 10,000 rows (16,700 rows/s) |
+| write I/O | 23.7 MiB |
+| query phase | 1.03 s for 1,000 top-k queries (970 queries/s) |
 | query I/O | 0 MiB |
 | peak RSS | 21 MiB |
 

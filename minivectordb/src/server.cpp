@@ -2,9 +2,11 @@
 
 #include "value.h"
 
+#include <poll.h>
 #include <unistd.h>
 
 #include <cstdio>
+#include <cerrno>
 #include <cstring>
 #include <iostream>
 #include <string>
@@ -171,6 +173,18 @@ bool StatementReader::next(std::string* statement) {
   return false;
 }
 
+bool StatementReader::pending(std::string* text) const {
+  std::string value = trim(buffer_.substr(statement_start_));
+  if (value.empty()) return false;
+  *text = value;
+  return true;
+}
+
+void StatementReader::consume_pending() {
+  statement_start_ = buffer_.size();
+  scan_ = buffer_.size();
+}
+
 bool StatementReader::flush(std::string* statement) {
   if (statement_start_ >= buffer_.size()) return false;
   std::string text = trim(buffer_.substr(statement_start_));
@@ -307,12 +321,45 @@ int Server::run() {
   }
 
   StatementReader reader;
-  std::string line;
+  std::string pending_input;
+  // The driver of the task sends statements that end with a semicolon.  A
+  // driver that sends one statement per line without a semicolon is also
+  // supported: when the input stays idle for a moment and the pending text
+  // is a complete statement, it is executed.
+  const int idle_timeout_ms = 250;
   while (true) {
-    if (!std::getline(std::cin, line)) break;
-    if (std::cin.eof() && line.empty()) break;
-    reader.append(line);
-    reader.append("\n");
+    struct pollfd descriptor;
+    descriptor.fd = 0;
+    descriptor.events = POLLIN;
+    descriptor.revents = 0;
+    int ready = poll(&descriptor, 1, idle_timeout_ms);
+    if (ready < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+    if (ready == 0) {
+      std::string pending;
+      if (reader.pending(&pending)) {
+        Statement parsed;
+        Status status = parse_statement(pending, &parsed);
+        if (status.ok() && parsed.type != StatementType::kEmpty) {
+          reader.consume_pending();
+          handle_statement(pending);
+          if (engine_.shutdown_requested()) break;
+        }
+      }
+      continue;
+    }
+    char chunk[8192];
+    ssize_t received = read(0, chunk, sizeof(chunk));
+    if (received < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+    if (received == 0) break;  // end of input
+    pending_input.append(chunk, static_cast<size_t>(received));
+    reader.append(pending_input);
+    pending_input.clear();
     std::string statement;
     while (reader.next(&statement)) {
       handle_statement(statement);

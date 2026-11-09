@@ -319,7 +319,7 @@ Status BTree::write_payload(uint64_t leaf, uint32_t slot_index,
 }
 
 Status BTree::leaf_insert(uint64_t leaf, uint64_t key, const std::string& payload,
-                          bool replace) {
+                          bool replace, bool allow_overflow) {
   uint8_t* page = nullptr;
   Status status = storage_->fetch_page(leaf, &page);
   if (!status.ok()) return status;
@@ -399,8 +399,28 @@ Status BTree::leaf_insert(uint64_t leaf, uint64_t key, const std::string& payloa
     slots_end = kLeafHeaderSize + count * kLeafSlotSize;
     heap_top = leaf_heap_top(page);
     if (heap_top - slots_end < needed) {
+      if (!allow_overflow) {
+        storage_->unpin_page(leaf);
+        return Status::Error(ErrorCode::kStorageCorrupt, "leaf page is full");
+      }
+      // The row does not fit into the page, it is stored in an overflow chain.
+      uint64_t chain = 0;
+      status = write_overflow_chain(storage_, payload, &chain);
+      if (!status.ok()) {
+        storage_->unpin_page(leaf);
+        return status;
+      }
+      status = storage_->note_modification(leaf, page);
+      if (!status.ok()) {
+        storage_->unpin_page(leaf);
+        return status;
+      }
+      leaf_set_slot(page, count, key, static_cast<uint32_t>(chain), length,
+                    kSlotOverflow);
+      leaf_set_slot_count(page, count + 1);
+      storage_->mark_dirty(leaf);
       storage_->unpin_page(leaf);
-      return Status::Error(ErrorCode::kStorageCorrupt, "leaf page is full");
+      return Status::Ok();
     }
   }
   status = storage_->note_modification(leaf, page);
@@ -658,7 +678,7 @@ Status BTree::insert(uint64_t key, const std::string& payload) {
   Status status = find_leaf(key, &path, &leaf);
   if (!status.ok()) return status;
 
-  status = leaf_insert(leaf, key, payload, false);
+  status = leaf_insert(leaf, key, payload, false, false);
   if (status.ok()) return status;
   if (status.code() != ErrorCode::kStorageCorrupt) return status;
 
@@ -669,7 +689,7 @@ Status BTree::insert(uint64_t key, const std::string& payload) {
   status = insert_into_parent(path, leaf, separator, right);
   if (!status.ok()) return status;
   uint64_t target = (key >= separator) ? right : leaf;
-  status = leaf_insert(target, key, payload, false);
+  status = leaf_insert(target, key, payload, false, true);
   if (!status.ok()) return status;
   return Status::Ok();
 }

@@ -30,6 +30,12 @@ text can be configured with `--ready-message`.
 * An empty statement (only whitespace and comments) is ignored and produces
   no output.
 
+A driver that sends one statement per line **without** a semicolon is
+supported as well: when the input stays idle for a moment and the pending
+text is a complete statement, it is executed.  A statement that is sent in
+several pieces is not affected, the semicolon still decides where a
+statement ends.
+
 ## 3. Answers
 
 Every statement produces exactly one answer block.  A block consists of
