@@ -260,9 +260,9 @@ slow `fsync`) the numbers are:
 
 | Metric | Value |
 | --- | --- |
-| write phase | 0.71 s for 10,000 rows (14,000 rows/s) |
+| write phase | 0.75 s for 10,000 rows (13,300 rows/s) |
 | write I/O | 23.7 MiB |
-| query phase | 0.70 s for 1,000 top-k queries (1,430 queries/s) |
+| query phase | 0.65 s for 1,000 top-k queries (1,540 queries/s) |
 | query I/O | 0 MiB |
 | peak RSS | 21 MiB |
 
@@ -320,13 +320,20 @@ a fixed case or by the differential test itself now:
   pages are split again and again and the tree grows over three levels.  It
   then deletes and updates rows and checks that every row that is still alive
   is found again, with and without the in-memory mirror.
+* The same sources are compiled with `-fsanitize=address,undefined` and the
+  whole suite is run with that binary.  The sanitizer found the write of a
+  row into a string that was too small, the buffer of the row overflowed the
+  string object.
 * `tests/bench.py` measures the write and the query phase of the
   competition workload.
 * `tests/large_data.py` writes a data set that is bigger than the memory
   budget (100,000 rows with 128 dimensional vectors are 48.8 MiB of vector
   payload) into a database with a 16 MiB cache budget and an 8 MiB buffer
-  pool.  The peak resident set size stays at 15.2 MiB while the queries
+  pool.  The peak resident set size stays at 15.0 MiB while the queries
   stream the data through the buffer pool, and the rows survive a restart.
+* The differential test is run with 60 seeds in the basic mode and with 30
+  seeds in the transaction and in the recovery mode, each with the in memory
+  mirror switched on and off, and with the page invariant check enabled.
 
 ## 10. Implemented features and known limitations
 

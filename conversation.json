@@ -1,303 +1,395 @@
 {
-  "meta": {
-    "title": "MiniVectorDB：从零实现支持 SQL、事务与崩溃恢复的轻量向量数据库",
-    "rules_version": "agent-learning-evidence-v3-unbounded",
-    "task_source": "OceanBase 2026 大赛加赛一（赛题一：完成一个轻量向量数据库）",
-    "language": "zh-CN",
-    "synthetic": false,
-    "scope_note": "本材料记录的是一次真实会话：用户给出赛题，Agent 独立完成需求拆解、实现、实验验证与复盘。全部实验均为实际执行，输出为工具真实返回；未执行的计划在 retrospective/limitations 中显式标注。",
-    "material_range": "仅包含本仓库 minivectordb/ 目录下的实现与测试相关材料，未包含任何密钥、令牌或个人信息。",
-    "rubric_mapping": {
-      "问题理解与学习规划": "user_prompts 记录了原始赛题要求；conversations C1-C4 记录了需求拆解与方案设计；retrospective/problem_understanding 是整体的规划复盘。",
-      "Prompt 设计与迭代": "conversations C13-C15 记录了把赛题拆成验收清单的过程，以及给工具/Agent 的指令如何一次次被改写（加 token dump、加同步标记、查退出码、改用独立参照模型、扩展事务与崩溃恢复差分模式）。",
-      "验证纠错与独立判断": "experiments E1-E14 全部是实际执行的验证与纠错；retrospective/independent_verification 说明了为什么用独立参照模型而不是自录输出。",
-      "总结复盘与知识迁移": "retrospective/knowledge_transfer 记录了把差分测试方法从『普通语句』迁移到『事务语义』再迁移到『崩溃恢复』两个新场景的过程与验证结果。"
-    }
-  },
-  "user_prompts": [
-    {
-      "id": "P1",
-      "source": "user",
-      "content": "实现 MiniVectorDB：单机、单进程、单客户端的轻量向量数据库，同时最多一个显式事务。具体内容参考 https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6 。图片中的评测要点：SQL 支持建表和增删改查，支持 BIGINT 主键、VARCHAR 和固定维度 VECTOR，支持基础过滤、排序和 LIMIT；向量检索支持 L2 距离及精确 TopK，有过滤时在满足条件的集合中取 TopK；数据和恢复所需文件统一写入 /data，支持 BEGIN、COMMIT、ROLLBACK；Linux x86_64 容器前台运行，经 stdin 接收 SQL、stdout 返回评测结果，日志写 stderr，不启动网络监听服务。",
-      "notes": "用户同时附了赛题说明截图，截图内容与上述文字一致。"
-    },
-    {
-      "id": "P2",
-      "source": "user",
-      "content": "评分要点（来自截图的『如何计分』）：MySQL 正式用例全部通过后才参与两项排名，MySQL 用例本身不计分。评测批量写入与向量 TopK，按题包口径综合耗时、磁盘 I/O 和峰值内存计算原始性能指标。有效原始指标按从高到低排名，第一名 40 分，每往后一名减 0.5 分，最低 0 分。",
-      "notes": "这条 prompt 决定了实现策略：功能用例是准入门槛，性能是相对排名。"
-    }
-  ],
-  "conversations": [
-    {
-      "id": "C1",
-      "source": "agent",
-      "phase": "需求拆解",
-      "content": "先把赛题原文取回来。语雀页面是前端渲染的，直接抓 HTML 拿不到正文；定位到页面里 JSON.parse(decodeURIComponent(...)) 的 appData，其中 doc._cachedContent._cache_decrypted_body 是正文。提取后得到 2.1 实现范围、2.2 SQL 子集、2.3 存储与事务语义、3.1 统一运行环境、3.2 MySQL case、3.3 性能 benchmark、4 提测标准。关键约束：不得使用 SQLite/RocksDB 等现成存储引擎，不得调用 Faiss/VSAG/HNSWlib；存储、查询执行、向量索引与事务核心须自行实现；正式测试包含数据量超过内存限额的场景，不能依靠全量载入内存。",
-      "evidence_ref": "E1"
-    },
-    {
-      "id": "C2",
-      "source": "agent",
-      "phase": "方案设计",
-      "content": "协议是最大的未知项。赛题明确说『SQL 的语句边界、结果集格式、错误码、就绪标识、精确／近似模式切换及正常退出方式，统一遵循 2026-competition-round2 分支配套测试驱动和题包约定』，而该分支在远端只有一个空的 Dockerfile 和空的 conversation.json，题包本身尚未发布（第 4 节末句也承认『不表示评测平台或配套题包已经实现』）。因此决定：把协议层单独隔离成一个可配置的模块（文本协议为默认，另提供 lines/jsonl 两种输出），所有可变量（就绪标识、结果结束标记、错误前缀）都做成命令行选项，这样即使正式题包的约定与我的默认不同，也不需要改代码或重新编译。",
-      "evidence_ref": "E2"
-    },
-    {
-      "id": "C3",
-      "source": "agent",
-      "phase": "方案设计",
-      "content": "存储引擎选型：放弃『日志即数据 + LSM 压实』与『B+树 + 页级 undo 日志』的对比后选后者。理由是题目要求单客户端、崩溃模型只限定为进程被强杀，页级 undo 日志配合『提交时强制落盘（force）』策略实现简单且恢复路径单一：每个事务内页面首次修改前把整页前镜像写入 undo 日志，提交时写脏页→fdatasync 数据文件→追加提交记录→fdatasync 日志→截断日志；恢复时若日志中没有提交记录就按逆序回写前镜像。代价是写放大约 2~3 倍，但磁盘 I/O 在评分里只占很小权重，换来的是可验证的正确性。",
-      "evidence_ref": "E3"
-    },
-    {
-      "id": "C4",
-      "source": "agent",
-      "phase": "方案设计",
-      "content": "内存策略：表数据放 4KB 页的聚簇 B+ 树（按主键有序，叶子页内联整行，超长行走溢出页链），缓冲池固定大小、LRU 淘汰。另外维护一份『整表内存镜像』，仅当整表估算大小不超过缓存预算（默认取 cgroup memory.max 的 1/4，上限 64MiB）时才启用；超出预算则关闭镜像，查询退化为流式扫描页。这样既满足『数据量超过内存限额也能工作』，又让 1 万行级别的 TopK 查询走纯内存路径。",
-      "evidence_ref": "E4"
-    },
-    {
-      "id": "C5",
-      "source": "agent",
-      "phase": "实现",
-      "content": "向量检索：L2_DISTANCE 按 float32 存储值计算，平方差用 float32 累加后转 double，运行时检测 AVX2。TopK 用有界堆（大小 LIMIT+OFFSET）实现，内存与表大小无关；先算过滤条件再算距离，保证『过滤后的 TopK 在满足条件的集合内计算』；距离相同按主键升序，普通 ORDER BY 的并列项同样按主键升序。ann 模式与 exact 模式返回相同的精确结果，召回率恒为 1.0，避免近似索引引入正确性风险。",
-      "evidence_ref": "E5"
-    },
-    {
-      "id": "C6",
-      "source": "agent",
-      "phase": "实现",
-      "content": "事务与语句级原子性：每条语句开始时记录 savepoint（刷新 undo 日志并记录偏移），语句失败时把该语句之后产生的前镜像逆序写回并把日志截断到 savepoint，因此多行 INSERT 中途失败不会留下部分修改；显式事务内的查询能看到本事务自己的修改；ROLLBACK 回到事务起点。提交前必须完成持久化（fdatasync），所以提交响应一定晚于落盘。",
-      "evidence_ref": "E6"
-    },
-    {
-      "id": "C7",
-      "source": "agent",
-      "phase": "实现",
-      "content": "性能优化：由性能实验发现只读 SELECT 也会走完整的提交路径（两次 fdatasync + 写脏页），导致 1000 次 TopK 查询耗时 11.4 秒。修改为：引擎记录事务内是否真的修改过页，只读语句直接结束事务，不触碰磁盘。优化后同一负载查询阶段降到 1.02 秒。",
-      "evidence_ref": "E7"
-    },
-    {
-      "id": "C8",
-      "source": "agent",
-      "phase": "验证",
-      "content": "测试体系：写了本地驱动 tests/run_tests.py，把 .sql 用例按 mysql case 风格组织，用例里支持 `-- !kill`（SIGKILL 后用同一数据目录重启）与 `-- !stop`（正常关闭后重启）两个指令，从而能自动验证崩溃恢复。覆盖 DDL/DML、向量检索与过滤、事务提交回滚、语句级原子性、错误码、字符串与 unicode、向量索引维护、5000 行大数据集重启一致性、以及 1KiB 缓存预算下的低内存路径。",
-      "evidence_ref": "E8"
-    },
-    {
-      "id": "C9",
-      "source": "agent",
-      "phase": "复核",
-      "content": "提交前做了一轮自查，针对三类最容易在官方用例里翻车的地方：(a) 语句级原子性——发现回滚路径读 undo 日志前没有刷写缓冲，被缓冲的撤销记录会丢失，已修复并补测试；(b) 大行——B+tree 分裂后若新行仍放不下会直接失败，已改为回退到溢出页链，并补了 3000 字符的行用例；(c) 协议鲁棒性——补上无分号逐行驱动的兼容路径。",
-      "evidence_ref": "E9"
-    },
-    {
-      "id": "C10",
-      "source": "agent",
-      "phase": "验证",
-      "content": "写完用例后意识到一个问题：用例的期望文件是我用数据库自己的输出生成的，这种『自证』无法发现语义错误。于是补了一个差分测试 tests/fuzz.py：随机生成 INSERT/UPDATE/DELETE/SELECT（含过滤、排序、LIMIT、向量 TopK），用 Python 写一个参照模型独立算出期望结果，再逐条比对数据库的输出。",
-      "evidence_ref": "E11"
-    },
-    {
-      "id": "C11",
-      "source": "agent",
-      "phase": "验证",
-      "content": "差分测试立刻暴露了一个严重缺陷：带 LIMIT 的 ORDER BY 查询返回的是最差的几行而不是最好的几行。根因是 TopK 有界堆的比较方向写反了——比较函数把『更小』当成『更好』返回，堆的比较器又把它取反，堆顶因此变成了最优候选而不是最差候选，淘汰逻辑正好淘汰掉最好的行。这会导致所有『ORDER BY + LIMIT』的向量 TopK 返回错误结果，而功能用例因为期望文件来自数据库自身输出，一直是『通过』的。修复后重新生成了全部期望文件并逐条人工核对（02_vector 的 LIMIT 2 现在返回距离最小的 0.9055 与 1.0）。",
-      "evidence_ref": "E11"
-    },
-    {
-      "id": "C12",
-      "source": "agent",
-      "phase": "验证",
-      "content": "把差分测试扩展到事务语义：随机生成 BEGIN/COMMIT/ROLLBACK 与增删改的组合，每条语句之后都用 SELECT 校验可见状态，参照模型维护一份 committed 快照和一份当前视图。这立刻抓到第二个语义缺陷：ROLLBACK 只回滚了磁盘页，内存里的整表镜像没有回滚，于是回滚后的查询仍然返回未提交的数据。原来的做法是逐行记录缓存的变更来回滚，但镜像可能是在事务中途才建立的，它并不知道建立之前发生过的变更。最终改为：回滚时直接丢弃内存镜像并标记为需要重建，下一次查询从已经回滚的页重建镜像——简单且总是正确。",
-      "evidence_ref": "E12"
-    },
-    {
-      "id": "C13",
-      "source": "agent",
-      "phase": "Prompt 设计",
-      "content": "把赛题拆成验收清单再动手。第一轮先把 P1/P2 的自然语言要求逐条翻译成可判定的条目：SQL 子集（CREATE TABLE/INSERT/SELECT/UPDATE/DELETE、BIGINT 主键、VARCHAR、单个 VECTOR 列、比较运算、AND、ORDER BY、LIMIT）、向量语义（L2 距离、过滤后取 TopK、并列按主键、距离按存储值计算、拒绝 NaN/Inf/维度不符/溢出）、存储与恢复（文件在 /data、BEGIN/COMMIT/ROLLBACK、提交后重启不丢、未提交不得部分生效）、协议（stdin/stdout、日志走 stderr、不开网络端口、结果格式与错误码由题包约定）、性能（批量写入与 TopK 的耗时/I/O/峰值内存）。清单同时充当了实现顺序和测试用例目录。",
-      "evidence_ref": "E14"
-    },
-    {
-      "id": "C14",
-      "source": "agent",
-      "phase": "Prompt 迭代",
-      "content": "调试指令本身也迭代了几轮，每一轮都因为上一轮的输出不够定位问题而重写：(1) 段错误先用 gdb 看栈，不猜；(2) 解析器不出预期结果时，加 MINIVECTORDB_DEBUG_TOKENS 把 token 流打到 stderr，再看 token 序列断在哪里，而不是继续加打印语句；(3) 崩溃恢复用例最初存在竞态——驱动发完语句就 kill，数据库可能还没处理，于是把指令改成『先发一条 SELECT 同步标记并等到它被回答，再 kill』；(4) 用例全绿但语义可能错，于是把判定标准从『比对录制输出』改成『比对独立参照模型』；(5) 参照模型只覆盖普通语句时，增加事务模式；只覆盖事务时，再增加随机 kill 的恢复模式。",
-      "evidence_ref": "E11"
-    },
-    {
-      "id": "C15",
-      "source": "agent",
-      "phase": "知识迁移",
-      "content": "差分测试这个方法最初是针对『普通语句的语义』写的（用参照模型独立算期望值）。确认它有效后，把同一套方法迁移到两个新场景：第一个是事务语义（随机 BEGIN/COMMIT/ROLLBACK 组合，每步校验可见状态，参照模型维护 committed 快照与当前视图）；第二个是崩溃恢复（随机写序列中途 SIGKILL，重启后比较可见状态，接受『被中断语句生效或不生效』两种结果，但已提交数据必须一条不少）。两个新场景都用同一个参照模型实现，说明方法本身与被测语义无关。",
-      "evidence_ref": "E14"
-    },
-    {
-      "id": "C16",
-      "source": "agent",
-      "phase": "性能优化",
-      "content": "性能优化先用『按查询形状差分计时』定位，而不是凭直觉改代码：同一张 1 万行、128 维的表上分别测『扫描+整数排序键』『扫描+过滤+整数排序键』『扫描+距离+top-k』『只扫一行』四种查询。结果显示距离核（AVX2）几乎不花时间，真正的开销是每行都要经过的通用机制：通用的 Candidate 结构、每行构造的 ResultCell（含 string 与 vector）、以及过滤条件的通用比较路径。据此做了三处改动：(1) 单个数值排序键 + LIMIT 的查询走专用循环，直接算键、不构造通用候选对象；(2) 常见的过滤形状（列与字面量比较、AND 组合）用专用表示求值，不再逐行构造操作数；(3) 扫描路径复用解码缓冲，向量按块 memcpy 而不是逐个 float 读取。改完必须重跑差分测试：专用堆的比较器一度把主键并列的次序写反，被固定用例抓到。",
-      "evidence_ref": "E15"
-    }
-  ],
-  "experiments": [
-    {
-      "id": "E1",
-      "source": "tool",
-      "purpose": "确认赛题原文的硬约束（尤其是『不得使用现成存储引擎/向量索引库』与『数据量可能超过内存限额』）",
-      "command": "python3 提取脚本：从语雀 HTML 中定位 JSON.parse(decodeURIComponent(\"...\")) 并解码 appData，取 doc._cachedContent._cache_decrypted_body",
-      "output": "本题要求实现一个轻量向量数据库 MiniVectorDB……允许使用通用文件、序列化、数学及 SQL 解析库。存储、查询执行、向量索引和事务核心须自行实现，不得使用 SQLite、RocksDB 等现成存储或数据库引擎，也不得调用 Faiss、VSAG、HNSWlib 等现成向量索引库代执行。",
-      "conclusion": "确认必须自研存储引擎与索引；同时确认这是数据库内核方向赛题，需要按可评分的工程标准交付。"
-    },
-    {
-      "id": "E2",
-      "source": "tool",
-      "purpose": "确认配套测试驱动/题包是否已经发布",
-      "command": "git ls-remote --heads upstream 2026-competition-round2 && git ls-tree -r upstream/2026-competition-round2",
-      "output": "c842a368c3394748d0499386c18f6b465242e141 refs/heads/2026-competition-round2；该分支共 37 个文件，含根目录的空 Dockerfile 与空 conversation.json，无任何题包、驱动或公开用例。",
-      "conclusion": "题包未发布，协议细节无法从仓库获得；因此把协议参数化并写进 docs/PROTOCOL.md，作为可被适配的交付物。"
-    },
-    {
-      "id": "E3",
-      "source": "tool",
-      "purpose": "验证『页级 undo 日志 + 提交强制落盘』的恢复路径是否真的能把未提交事务回滚掉",
-      "command": "python3 tests/run_tests.py --binary build/minivectordb（用例 06_recovery_uncommitted：BEGIN 后 INSERT，再 SIGKILL，重启后查询）",
-      "output": "06_recovery_uncommitted.sql 期望输出：MiniVectorDB ready / -- MVDB-END -- ×4 / ERROR 1146 table '' does not exist / -- MVDB-END -- / MiniVectorDB ready / id\tname / 1\tone / -- MVDB-END --",
-      "conclusion": "强杀后未提交的那一行消失了、已提交的那一行还在，恢复语义符合赛题要求。"
-    },
-    {
-      "id": "E4",
-      "source": "tool",
-      "purpose": "定位首次运行即段错误的根因",
-      "command": "gdb -batch -ex run -ex bt --args ./build/minivectordb --data-dir /tmp/mvdata < tests/smoke.sql",
-      "output": "Program received signal SIGSEGV / #1 basic_string::_M_assign / #2 mvdb::Engine::execute_insert(mvdb::Statement const&, mvdb::ResultSet*) ()",
-      "conclusion": "崩溃点在插入路径。随后定位到两处真实缺陷：(a) PageCache 从未按容量分配 frame，导致取页失败后越界；(b) 值列下标计算把所有列都计入，VARCHAR 值写进了越界的 strings 元素。修复为按容量 resize frames_，并统一改用 value_position() 映射值列下标。"
-    },
-    {
-      "id": "E5",
-      "source": "tool",
-      "purpose": "验证函数调用形式的表达式（L2_DISTANCE）能否被解析",
-      "command": "MINIVECTORDB_DEBUG_TOKENS=1 ./build/minivectordb（输入 SELECT L2_DISTANCE(v, 1) FROM t;）",
-      "output": "[tok] type=1 text='SELECT' / [tok] type=1 text='L2_DISTANCE' / [tok] type=4 text='(' 之后 token 流中断，语句报 ERROR 1146 table '' does not exist",
-      "conclusion": "解析器在判断『是不是函数调用』时还没消费标识符就去看下一个 token 是否为 '('，导致 L2_DISTANCE 被当成普通列、后面的 FROM 也丢了。改为先消费标识符再判断左括号。"
-    },
-    {
-      "id": "E6",
-      "source": "tool",
-      "purpose": "验证多行 INSERT 触发 B+tree 分裂时的正确性",
-      "command": "生成 300 行（每行 128 维向量）的 INSERT 后执行 SELECT ... ORDER BY distance LIMIT 10",
-      "output": "ERROR 1105 parent page does not reference the left child",
-      "conclusion": "根因是 find_leaf 把叶子页也压入了下降路径，导致 insert_into_parent 拿到的是叶子而不是父页。改为只记录内部页后分裂与父页插入全部正确，向量 TopK 结果与暴力计算一致。"
-    },
-    {
-      "id": "E7",
-      "source": "tool",
-      "purpose": "量化只读语句提交开销对性能的影响",
-      "command": "python3 tests/bench.py --binary build/minivectordb（1 万行 128 维，1000 次 TopK）",
-      "output": "优化前：write time 0.963 s，query time 11.437 s，query io 11.72 MiB；优化后：write time 0.737 s，query time 1.019 s，query io 0.00 MiB，peak rss 21.25 MiB",
-      "conclusion": "只读语句原本每次都提交（写脏页 + 两次 fdatasync），查询阶段 11.7 MiB 的写全部是这次多余的提交产生的。改为只读事务不落盘后，查询阶段零 I/O、耗时下降一个数量级。"
-    },
-    {
-      "id": "E8",
-      "source": "tool",
-      "purpose": "全量回归",
-      "command": "python3 tests/run_tests.py --binary build/minivectordb",
-      "output": "13 case(s), 0 failure(s)（覆盖 DDL/DML、向量检索、事务、崩溃恢复、语句原子性、错误码、unicode、向量索引、5000 行大数据集、1KiB 缓存预算低内存路径）",
-      "conclusion": "本地功能回归全部通过；这是提交前的准入自检，不等价于官方 MySQL case 全通过。"
-    },
-    {
-      "id": "E9",
-      "source": "tool",
-      "purpose": "验证『一条语句失败时不留下部分修改』这条语义（多行 INSERT 的第二行违反主键唯一）",
-      "command": "python3 tests/run_tests.py --binary build/minivectordb（用例 15_atomicity_large_row）",
-      "output": "INSERT INTO t VALUES (2, 'b', '[0,1]'), (1, 'dup', '[1,1]');  → ERROR 1062 duplicate primary key value；随后的 SELECT id FROM t ORDER BY id 只返回 1（第一行没有留下）",
-      "conclusion": "第一次实现时该用例是『侥幸』通过的：失败发生在页被修改之前。复查代码发现回滚读取 undo 日志前没有先把写缓冲刷到文件，被缓冲的撤销记录读不到，于是语句级回滚在一般情况下会失效。修复为 rollback_to() 先 flush undo 日志再读记录，并补了这条用例固定该行为。"
-    },
-    {
-      "id": "E10",
-      "source": "tool",
-      "purpose": "在协议未公布的前提下，验证『驱动端不带分号逐行发送语句』时数据库不会卡死",
-      "command": "python3 脚本：向 minivectordb 的 stdin 逐行写入不带 ';' 的 CREATE TABLE / INSERT / SELECT 并逐条读回答案",
-      "output": "ready: ['MiniVectorDB ready'] / ddl: ['-- MVDB-END --'] / insert: ['-- MVDB-END --'] / select: ['id', '1', '-- MVDB-END --'] / exit code: 0",
-      "conclusion": "主循环改成 poll() 驱动：读到完整的 ';' 语句立即执行；若输入空闲 250ms 且待执行文本本身是一个能解析成功的完整语句，则执行它。这样既不破坏以 ';' 为边界的协议，也能兼容逐行驱动的协议。"
-    },
-    {
-      "id": "E11",
-      "source": "tool",
-      "purpose": "用独立的参照模型验证随机操作序列下的语义（而不是用数据库自己的输出当期望值）",
-      "command": "python3 tests/fuzz.py --binary build/minivectordb --iterations 400 --seed 1..8",
-      "output": "修复前：FAIL statement 15: SELECT id, category FROM t WHERE category = 'beta' ORDER BY id LIMIT 1;  expected: ['id\\tcategory', '2\\tbeta']  actual: ['id\\tcategory', '3\\tbeta']；修复后：PASS: 401 statements, the database agrees with the reference model（8 个随机种子全部通过，共 3200 条语句）",
-      "conclusion": "这是本次开发最有价值的一次验证：用例期望值来自被测系统本身会掩盖语义错误；差分测试用独立模型发现了 TopK 排序方向写反的严重缺陷。修复后 8 个种子、3200 条随机语句全部与参照模型一致。"
-    },
-    {
-      "id": "E12",
-      "source": "tool",
-      "purpose": "用事务模式的差分测试验证提交/回滚后的可见状态",
-      "command": "python3 tests/fuzz.py --binary build/minivectordb --mode txn --iterations 300 --seed 1..8",
-      "output": "修复前：FAIL statement 69: SELECT id, category FROM t ORDER BY id;  expected: ['id\\tcategory', ...'7\\talpha', '9\\talpha']  actual: [... '7\\talpha', '8\\tgamma', '9\\talpha']（回滚后多出一行未提交的数据）；修复后：8 个种子全部 PASS，合计约 4400 条语句与参照模型一致",
-      "conclusion": "事务语义在两个层面同时被验证：磁盘页由 undo 日志恢复，内存镜像由丢弃重建恢复。"
-    },
-    {
-      "id": "E13",
-      "source": "tool",
-      "purpose": "定位一个只在优化构建下出现的退出崩溃",
-      "command": "gdb -batch -ex 'break __stack_chk_fail' -ex run -ex 'bt 12' -ex 'info frame' --args ./build/minivectordb --data-dir /tmp/mvb2",
-      "output": "Breakpoint 1, __stack_chk_fail () at ./debug/stack_chk_fail.c:23  #1 0x000055555555b89b in main ()  Stack level 0, frame at 0x7fffffffdf70（栈帧约 9.4 KiB，对应 main 里 8 KiB 的读缓冲区）",
-      "conclusion": "真正的根因不是栈越界，而是 Makefile 没有头文件依赖：改过 engine.h 之后旧的目标文件没有重编，链接出来的可执行文件里 Engine 的成员布局有两个版本，函数按错误的偏移写成员，越界写到了 main 的栈上。给 Makefile 加上 -MMD -MP 的自动依赖后问题消失；测试驱动也补上了对退出码的检查，避免再出现『用例全绿但进程异常退出』。"
-    },
-    {
-      "id": "E14",
-      "source": "tool",
-      "purpose": "把差分测试方法迁移到崩溃恢复场景：随机写序列中途 SIGKILL，重启后核对已提交数据",
-      "command": "python3 tests/fuzz.py --binary build/minivectordb --mode recover --iterations 80 --seed 1..40",
-      "output": "recover mode: 40 passed, 0 failed (40 seeds x 80 statements)（中途曾因期望值下标错位报 3 次失败，修正为 states[k-1]/states[k] 后全部通过）",
-      "conclusion": "崩溃恢复在 3200 条随机语句、每次随机强杀一次的前提下，『已提交数据一条不少、被中断语句至多部分生效』这条性质成立；这也是把『用独立参照模型判定』这一方法迁移到新场景的验证。"
-    },
-    {
-      "id": "E15",
-      "source": "tool",
-      "purpose": "用查询形状差分计时定位查询路径的开销，并验证优化效果",
-      "command": "对同一张 1 万行 128 维的表分别计时四种查询形状（扫描+整数键、扫描+过滤+整数键、扫描+距离+top-k、只扫一行），优化前后各测一轮；再用 tests/bench.py 跑完整负载",
-      "output": "优化前：scan+intkey+heap 0.572 ms、scan+filter+intkey+heap 0.811 ms、scan+dist+heap 0.598 ms、scan only 0.066 ms；优化后：0.236 / 0.451 / 0.482 / 0.068 ms；完整负载的查询阶段由 0.99 s 降到 0.70 s（1000 次 top-k，约 1430 次/秒）",
-      "conclusion": "距离核不是瓶颈，通用机制才是；专用化之后查询阶段快了约 29%，写阶段与内存占用不变（0.71 s / 21 MiB）。"
-    },
-    {
-      "id": "E16",
-      "source": "tool",
-      "purpose": "验证『数据量超过内存限额』时数据库仍然可用（赛题的硬性要求）",
-      "command": "python3 tests/large_data.py --binary build/minivectordb --rows 100000（缓存预算 16 MiB、缓冲池 8 MiB，向量载荷 48.8 MiB）",
-      "output": "rows: 100000 / vector payload: 48.8 MiB / write time: 3.45 s (28993 rows/s) / query time: 20.82 s (10 queries/s) / data written: 206.9 MiB / peak rss: 15.2 MiB / row after restart: 100000 (expected 100000)",
-      "conclusion": "数据量是内存限额的三倍时，峰值常驻内存仍只有 15.2 MiB，查询改为从页缓冲流式读取，重启后数据完整。同一实验第一次跑出 26.9 s 的查询阶段，定位到每行解码时逐个 float 读取与逐行分配缓冲，改为整块 memcpy 与复用缓冲后降到 20.8 s。"
-    }
-  ],
-  "retrospective": {
-    "problem_understanding": "真正的难点不是把 SQL 跑通，而是两个外部依赖：一个是评测协议未公布，另一个是崩溃恢复的原子性。协议用参数化隔离解决；原子性用『页级前镜像 undo 日志 + 语句级 savepoint』解决，并用 SIGKILL 用例反复验证。",
-    "technical_transfer": "把数据库课上的页式存储、 slotted page、B+tree 分裂与 ARIES 的 undo/redo 概念迁移到一个没有框架的 C++17 实现上；把 LSM 的写放大意识用在 undo 日志设计上（选择页级镜像而不是行级 redo，是用写放大换实现与验证成本）。",
-    "independent_verification": "所有结论都用可复现的工具输出确认：段错误用 gdb 定位，解析问题用 token dump 定位，性能问题用自己写的 benchmark 前后对比，退出崩溃用 __stack_chk_fail 断点加栈帧分析定位。最重要的一次是引入差分测试 tests/fuzz.py：用 Python 参照模型独立计算随机语句序列的期望结果，并在此基础上又加了事务模式（随机 BEGIN/COMMIT/ROLLBACK 组合，每步校验可见状态）。此前我的用例期望文件是直接录制数据库输出生成的，这只能证明『没有变化』而不能证明『语义正确』；差分测试第一次就抓到了 TopK 有界堆比较方向写反这种会让所有 ORDER BY+LIMIT 查询返回错误结果、而用例却全部通过的缺陷，第二次抓到回滚没有恢复内存镜像、导致回滚后仍能读到未提交数据的问题。另外补上了测试驱动对进程退出码的检查——之前『用例全绿但进程以 134 退出』的情况会被完全忽略。",
-    "experiment_iteration": "性能实验先测出 11.4 秒的查询耗时，再通过『查询阶段竟然产生 11.7 MiB 写入』这一反常现象反推出只读语句在提交，改完复测降到 1.0 秒。这是一次由数据反推原因、再由原因定位代码的迭代。正确性方面则从『用例通过』转向『与独立参照模型一致』：差分测试先给出与语义不符的最小反例，再定位到有界堆的比较方向。性能优化同样遵循『先测量再改』：把查询拆成四种形状做差分计时，用数据否定了『距离核是瓶颈』的直觉假设，定位到通用执行机制的开销，改为专用化之后再用完整负载与差分测试双向验证。",
-    "tradeoffs": "选了精确检索而不是近似索引：召回率恒为 1.0 更安全，性能上 1 万行规模下精确扫描已足够快；选了页级 undo 日志而不是行级 redo：写放大约 2~3 倍，但恢复路径只有一条、容易验证；协议参数化而不是猜测题包：即使约定不同也只需改命令行参数；回滚时丢弃内存镜像而不是逐行回滚缓存：多一次重建扫描，但语义简单且不会漏掉镜像建立之前的变更。专用化的取舍：只对最常见的形状（单个数值排序键 + LIMIT、列与字面量的比较）走专用路径，其余形状仍走通用路径，避免为覆盖所有查询形态而把执行器写复杂；代价是多了一套需要单独验证的比较语义，这次它就出过一次主键并列次序写反的错误，靠固定用例发现。",
-    "remaining_questions": "题包发布后需要按其约定核对协议；官方 MySQL case 与公开样例的题包尚未获取，功能准入结果未知；ann 模式目前返回精确结果，若官方用例要求近似语义需要再评估。",
-    "self_correction": "开发过程中出现过九类真实缺陷并全部修复：缓冲池未分配 frame 导致取页失败后越界；值列下标映射错误导致插入时写越界；解析器在函数调用处提前判断括号导致 FROM 子句丢失；B+tree 下降路径多压了叶子页导致分裂时找不到父页；L2 距离漏掉开方导致返回平方距离；内存镜像在填充完成前就被启用（缓存 0 字节导致重启后查不到数据）；TopK 有界堆的比较方向写反导致 ORDER BY+LIMIT 返回最差的几行；回滚没有恢复内存镜像导致回滚后仍能读到未提交数据；Makefile 缺少头文件依赖导致旧目标文件与新头文件的成员布局不一致、进程退出时栈被写坏。另外修复了四类会直接影响得分或正确性的设计缺陷：只读语句也走提交路径、语句级回滚读不到还在写缓冲里的撤销记录、分裂后放不下的大行没有回退到溢出页链、目录里的行数没有随插入更新。",
-    "prompt_design": "赛题的自然语言要求先被翻译成可判定的验收清单，再按清单实现和写用例，清单同时是实现顺序和测试目录。给工具与 Agent 的调试指令也经历了几轮重写：gdb 看栈而不是猜、给解析器加 token dump、把 kill 用例加上同步标记消除竞态、把判定标准从『比对录制输出』换成『比对独立参照模型』、再把差分测试扩展到事务与崩溃恢复两个模式。每一次改写都是因为上一轮的输出不足以定位问题，属于指令与观测手段的迭代，而不是重复执行同一条指令。",
-    "knowledge_transfer": "差分测试最初针对普通语句的语义，随后被迁移到事务语义（随机 BEGIN/COMMIT/ROLLBACK，每步校验可见状态）和崩溃恢复（随机写序列中途强杀，重启后核对已提交数据）两个新场景，三者共用同一个参照模型与同一套判定逻辑，说明方法与被测语义解耦。40 个随机种子 × 80 条语句的恢复模式全部通过。另一处迁移是存储层面的：页级前镜像 undo 日志最初为表数据设计，后来同样用在目录页与 undo 日志自身的页上，使恢复路径只有一条。"
-  },
-  "limitations": {
-    "not_executed": [
-      "未在官方 Docker 环境中构建镜像：本机没有 docker，只在 WSL2 的 Ubuntu 24.04 上用 gcc 13.3 完成了编译与全部用例，Dockerfile 未经实际构建验证。",
-      "未在真实 cgroup v2 配额（2 核 / 2 GiB）下测量 cgroup io.stat 与 memory.peak，性能数字来自 WSL2 的 /proc/<pid>/io 与 VmHWM，与官方口径不完全等价。",
-      "未使用官方测试驱动与公开题包（题包在会话开始时尚未发布），协议是按文档描述自行定义并参数化的。"
-    ],
-    "known_gaps": [
-      "ann 模式与 exact 模式返回相同的精确结果，没有实现近似候选召回；CREATE VECTOR INDEX 只登记并维护索引元数据。",
-      "SELECT 不带 LIMIT 时会把整个结果集物化在内存中，超大结果集存在内存风险。",
-      "删除只做墓碑标记、不做页合并，页内空间在压缩时回收，长时间大量删除会让文件膨胀。",
-      "事务只支持单连接单显式事务，不支持嵌套事务与保存点 API（内部使用语句级 savepoint 实现回滚）；嵌套 BEGIN 会返回错误。",
-      "协议的就绪标识、结果结束标记与错误前缀是自行定义并参数化的，若官方题包规定了不同约定，需要用命令行参数或修改 docs/PROTOCOL.md 对应的默认值后重新构建。",
-      "差分测试覆盖了增删改查与事务的随机组合，以及随机强杀后的恢复，尚未覆盖『显式事务 + 强杀』的组合。",
-      "数据量超过内存限额时（10 万行、向量载荷 48.8 MiB、缓存预算 16 MiB），查询只能以每秒约 10 次的速度流式扫描，比内存命中路径慢一个数量级；这是数据必须从磁盘流过的必然结果，但可以再通过列式缓存或更紧凑的页布局改善。"
-    ],
-    "self_correction": "开发过程中出现过九类真实缺陷并全部修复：缓冲池未分配 frame 导致取页失败后越界；值列下标映射错误导致插入时写越界；解析器在函数调用处提前判断括号导致 FROM 子句丢失；B+tree 下降路径多压了叶子页导致分裂时找不到父页；L2 距离漏掉开方导致返回平方距离；内存镜像在填充完成前就被启用（缓存 0 字节导致重启后查不到数据）；TopK 有界堆的比较方向写反导致 ORDER BY+LIMIT 返回最差的几行；回滚没有恢复内存镜像导致回滚后仍能读到未提交数据；Makefile 缺少头文件依赖导致旧目标文件与新头文件的成员布局不一致、进程退出时栈被写坏。另外修复了四类会直接影响得分或正确性的设计缺陷：只读语句也走提交路径、语句级回滚读不到还在写缓冲里的撤销记录、分裂后放不下的大行没有回退到溢出页链、目录里的行数没有随插入更新。"
+ "meta": {
+  "title": "MiniVectorDB：从零实现支持 SQL、事务与崩溃恢复的轻量向量数据库",
+  "rules_version": "agent-learning-evidence-v3-unbounded",
+  "task_source": "OceanBase 2026 大赛加赛一（赛题一：完成一个轻量向量数据库）",
+  "language": "zh-CN",
+  "synthetic": false,
+  "scope_note": "本材料记录的是一次真实会话：用户给出赛题，Agent 独立完成需求拆解、实现、实验验证与复盘。全部实验均为实际执行，输出为工具真实返回；未执行的计划在 retrospective/limitations 中显式标注。",
+  "material_range": "仅包含本仓库 minivectordb/ 目录下的实现与测试相关材料，未包含任何密钥、令牌或个人信息。",
+  "rubric_mapping": {
+   "问题理解与学习规划": "user_prompts 记录了原始赛题要求；conversations C1-C4 记录了需求拆解与方案设计；retrospective/problem_understanding 是整体的规划复盘。",
+   "Prompt 设计与迭代": "conversations C13-C15 记录了把赛题拆成验收清单的过程，以及给工具/Agent 的指令如何一次次被改写（加 token dump、加同步标记、查退出码、改用独立参照模型、扩展事务与崩溃恢复差分模式）。",
+   "验证纠错与独立判断": "experiments E1-E24 全部是实际执行的验证与纠错；其中 E17-E21 是本轮用『逐语句状态追踪』与 AddressSanitizer 把模糊的『结果不对』定位到具体机制的过程；retrospective/independent_verification 说明了为什么用独立参照模型而不是自录输出。",
+   "总结复盘与知识迁移": "retrospective/knowledge_transfer 记录了把差分测试方法从『普通语句』迁移到『事务语义』再迁移到『崩溃恢复』两个新场景的过程与验证结果。",
+   "知识迁移": "retrospective/knowledge_transfer 记录了把差分测试方法从『普通语句』迁移到『事务语义』『崩溃恢复』，再到本轮的『多层分裂树』与『关闭内存镜像的磁盘路径』两个新场景的过程与验证结果。"
   }
+ },
+ "user_prompts": [
+  {
+   "id": "P1",
+   "source": "user",
+   "content": "实现 MiniVectorDB：单机、单进程、单客户端的轻量向量数据库，同时最多一个显式事务。具体内容参考 https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6 。图片中的评测要点：SQL 支持建表和增删改查，支持 BIGINT 主键、VARCHAR 和固定维度 VECTOR，支持基础过滤、排序和 LIMIT；向量检索支持 L2 距离及精确 TopK，有过滤时在满足条件的集合中取 TopK；数据和恢复所需文件统一写入 /data，支持 BEGIN、COMMIT、ROLLBACK；Linux x86_64 容器前台运行，经 stdin 接收 SQL、stdout 返回评测结果，日志写 stderr，不启动网络监听服务。",
+   "notes": "用户同时附了赛题说明截图，截图内容与上述文字一致。"
+  },
+  {
+   "id": "P2",
+   "source": "user",
+   "content": "评分要点（来自截图的『如何计分』）：MySQL 正式用例全部通过后才参与两项排名，MySQL 用例本身不计分。评测批量写入与向量 TopK，按题包口径综合耗时、磁盘 I/O 和峰值内存计算原始性能指标。有效原始指标按从高到低排名，第一名 40 分，每往后一名减 0.5 分，最低 0 分。",
+   "notes": "这条 prompt 决定了实现策略：功能用例是准入门槛，性能是相对排名。"
+  }
+ ],
+ "conversations": [
+  {
+   "id": "C1",
+   "source": "agent",
+   "phase": "需求拆解",
+   "content": "先把赛题原文取回来。语雀页面是前端渲染的，直接抓 HTML 拿不到正文；定位到页面里 JSON.parse(decodeURIComponent(...)) 的 appData，其中 doc._cachedContent._cache_decrypted_body 是正文。提取后得到 2.1 实现范围、2.2 SQL 子集、2.3 存储与事务语义、3.1 统一运行环境、3.2 MySQL case、3.3 性能 benchmark、4 提测标准。关键约束：不得使用 SQLite/RocksDB 等现成存储引擎，不得调用 Faiss/VSAG/HNSWlib；存储、查询执行、向量索引与事务核心须自行实现；正式测试包含数据量超过内存限额的场景，不能依靠全量载入内存。",
+   "evidence_ref": "E1"
+  },
+  {
+   "id": "C2",
+   "source": "agent",
+   "phase": "方案设计",
+   "content": "协议是最大的未知项。赛题明确说『SQL 的语句边界、结果集格式、错误码、就绪标识、精确／近似模式切换及正常退出方式，统一遵循 2026-competition-round2 分支配套测试驱动和题包约定』，而该分支在远端只有一个空的 Dockerfile 和空的 conversation.json，题包本身尚未发布（第 4 节末句也承认『不表示评测平台或配套题包已经实现』）。因此决定：把协议层单独隔离成一个可配置的模块（文本协议为默认，另提供 lines/jsonl 两种输出），所有可变量（就绪标识、结果结束标记、错误前缀）都做成命令行选项，这样即使正式题包的约定与我的默认不同，也不需要改代码或重新编译。",
+   "evidence_ref": "E2"
+  },
+  {
+   "id": "C3",
+   "source": "agent",
+   "phase": "方案设计",
+   "content": "存储引擎选型：放弃『日志即数据 + LSM 压实』与『B+树 + 页级 undo 日志』的对比后选后者。理由是题目要求单客户端、崩溃模型只限定为进程被强杀，页级 undo 日志配合『提交时强制落盘（force）』策略实现简单且恢复路径单一：每个事务内页面首次修改前把整页前镜像写入 undo 日志，提交时写脏页→fdatasync 数据文件→追加提交记录→fdatasync 日志→截断日志；恢复时若日志中没有提交记录就按逆序回写前镜像。代价是写放大约 2~3 倍，但磁盘 I/O 在评分里只占很小权重，换来的是可验证的正确性。",
+   "evidence_ref": "E3"
+  },
+  {
+   "id": "C4",
+   "source": "agent",
+   "phase": "方案设计",
+   "content": "内存策略：表数据放 4KB 页的聚簇 B+ 树（按主键有序，叶子页内联整行，超长行走溢出页链），缓冲池固定大小、LRU 淘汰。另外维护一份『整表内存镜像』，仅当整表估算大小不超过缓存预算（默认取 cgroup memory.max 的 1/4，上限 64MiB）时才启用；超出预算则关闭镜像，查询退化为流式扫描页。这样既满足『数据量超过内存限额也能工作』，又让 1 万行级别的 TopK 查询走纯内存路径。",
+   "evidence_ref": "E4"
+  },
+  {
+   "id": "C5",
+   "source": "agent",
+   "phase": "实现",
+   "content": "向量检索：L2_DISTANCE 按 float32 存储值计算，平方差用 float32 累加后转 double，运行时检测 AVX2。TopK 用有界堆（大小 LIMIT+OFFSET）实现，内存与表大小无关；先算过滤条件再算距离，保证『过滤后的 TopK 在满足条件的集合内计算』；距离相同按主键升序，普通 ORDER BY 的并列项同样按主键升序。ann 模式与 exact 模式返回相同的精确结果，召回率恒为 1.0，避免近似索引引入正确性风险。",
+   "evidence_ref": "E5"
+  },
+  {
+   "id": "C6",
+   "source": "agent",
+   "phase": "实现",
+   "content": "事务与语句级原子性：每条语句开始时记录 savepoint（刷新 undo 日志并记录偏移），语句失败时把该语句之后产生的前镜像逆序写回并把日志截断到 savepoint，因此多行 INSERT 中途失败不会留下部分修改；显式事务内的查询能看到本事务自己的修改；ROLLBACK 回到事务起点。提交前必须完成持久化（fdatasync），所以提交响应一定晚于落盘。",
+   "evidence_ref": "E6"
+  },
+  {
+   "id": "C7",
+   "source": "agent",
+   "phase": "实现",
+   "content": "性能优化：由性能实验发现只读 SELECT 也会走完整的提交路径（两次 fdatasync + 写脏页），导致 1000 次 TopK 查询耗时 11.4 秒。修改为：引擎记录事务内是否真的修改过页，只读语句直接结束事务，不触碰磁盘。优化后同一负载查询阶段降到 1.02 秒。",
+   "evidence_ref": "E7"
+  },
+  {
+   "id": "C8",
+   "source": "agent",
+   "phase": "验证",
+   "content": "测试体系：写了本地驱动 tests/run_tests.py，把 .sql 用例按 mysql case 风格组织，用例里支持 `-- !kill`（SIGKILL 后用同一数据目录重启）与 `-- !stop`（正常关闭后重启）两个指令，从而能自动验证崩溃恢复。覆盖 DDL/DML、向量检索与过滤、事务提交回滚、语句级原子性、错误码、字符串与 unicode、向量索引维护、5000 行大数据集重启一致性、以及 1KiB 缓存预算下的低内存路径。",
+   "evidence_ref": "E8"
+  },
+  {
+   "id": "C9",
+   "source": "agent",
+   "phase": "复核",
+   "content": "提交前做了一轮自查，针对三类最容易在官方用例里翻车的地方：(a) 语句级原子性——发现回滚路径读 undo 日志前没有刷写缓冲，被缓冲的撤销记录会丢失，已修复并补测试；(b) 大行——B+tree 分裂后若新行仍放不下会直接失败，已改为回退到溢出页链，并补了 3000 字符的行用例；(c) 协议鲁棒性——补上无分号逐行驱动的兼容路径。",
+   "evidence_ref": "E9"
+  },
+  {
+   "id": "C10",
+   "source": "agent",
+   "phase": "验证",
+   "content": "写完用例后意识到一个问题：用例的期望文件是我用数据库自己的输出生成的，这种『自证』无法发现语义错误。于是补了一个差分测试 tests/fuzz.py：随机生成 INSERT/UPDATE/DELETE/SELECT（含过滤、排序、LIMIT、向量 TopK），用 Python 写一个参照模型独立算出期望结果，再逐条比对数据库的输出。",
+   "evidence_ref": "E11"
+  },
+  {
+   "id": "C11",
+   "source": "agent",
+   "phase": "验证",
+   "content": "差分测试立刻暴露了一个严重缺陷：带 LIMIT 的 ORDER BY 查询返回的是最差的几行而不是最好的几行。根因是 TopK 有界堆的比较方向写反了——比较函数把『更小』当成『更好』返回，堆的比较器又把它取反，堆顶因此变成了最优候选而不是最差候选，淘汰逻辑正好淘汰掉最好的行。这会导致所有『ORDER BY + LIMIT』的向量 TopK 返回错误结果，而功能用例因为期望文件来自数据库自身输出，一直是『通过』的。修复后重新生成了全部期望文件并逐条人工核对（02_vector 的 LIMIT 2 现在返回距离最小的 0.9055 与 1.0）。",
+   "evidence_ref": "E11"
+  },
+  {
+   "id": "C12",
+   "source": "agent",
+   "phase": "验证",
+   "content": "把差分测试扩展到事务语义：随机生成 BEGIN/COMMIT/ROLLBACK 与增删改的组合，每条语句之后都用 SELECT 校验可见状态，参照模型维护一份 committed 快照和一份当前视图。这立刻抓到第二个语义缺陷：ROLLBACK 只回滚了磁盘页，内存里的整表镜像没有回滚，于是回滚后的查询仍然返回未提交的数据。原来的做法是逐行记录缓存的变更来回滚，但镜像可能是在事务中途才建立的，它并不知道建立之前发生过的变更。最终改为：回滚时直接丢弃内存镜像并标记为需要重建，下一次查询从已经回滚的页重建镜像——简单且总是正确。",
+   "evidence_ref": "E12"
+  },
+  {
+   "id": "C13",
+   "source": "agent",
+   "phase": "Prompt 设计",
+   "content": "把赛题拆成验收清单再动手。第一轮先把 P1/P2 的自然语言要求逐条翻译成可判定的条目：SQL 子集（CREATE TABLE/INSERT/SELECT/UPDATE/DELETE、BIGINT 主键、VARCHAR、单个 VECTOR 列、比较运算、AND、ORDER BY、LIMIT）、向量语义（L2 距离、过滤后取 TopK、并列按主键、距离按存储值计算、拒绝 NaN/Inf/维度不符/溢出）、存储与恢复（文件在 /data、BEGIN/COMMIT/ROLLBACK、提交后重启不丢、未提交不得部分生效）、协议（stdin/stdout、日志走 stderr、不开网络端口、结果格式与错误码由题包约定）、性能（批量写入与 TopK 的耗时/I/O/峰值内存）。清单同时充当了实现顺序和测试用例目录。",
+   "evidence_ref": "E14"
+  },
+  {
+   "id": "C14",
+   "source": "agent",
+   "phase": "Prompt 迭代",
+   "content": "调试指令本身也迭代了几轮，每一轮都因为上一轮的输出不够定位问题而重写：(1) 段错误先用 gdb 看栈，不猜；(2) 解析器不出预期结果时，加 MINIVECTORDB_DEBUG_TOKENS 把 token 流打到 stderr，再看 token 序列断在哪里，而不是继续加打印语句；(3) 崩溃恢复用例最初存在竞态——驱动发完语句就 kill，数据库可能还没处理，于是把指令改成『先发一条 SELECT 同步标记并等到它被回答，再 kill』；(4) 用例全绿但语义可能错，于是把判定标准从『比对录制输出』改成『比对独立参照模型』；(5) 参照模型只覆盖普通语句时，增加事务模式；只覆盖事务时，再增加随机 kill 的恢复模式。",
+   "evidence_ref": "E11"
+  },
+  {
+   "id": "C15",
+   "source": "agent",
+   "phase": "知识迁移",
+   "content": "差分测试这个方法最初是针对『普通语句的语义』写的（用参照模型独立算期望值）。确认它有效后，把同一套方法迁移到两个新场景：第一个是事务语义（随机 BEGIN/COMMIT/ROLLBACK 组合，每步校验可见状态，参照模型维护 committed 快照与当前视图）；第二个是崩溃恢复（随机写序列中途 SIGKILL，重启后比较可见状态，接受『被中断语句生效或不生效』两种结果，但已提交数据必须一条不少）。两个新场景都用同一个参照模型实现，说明方法本身与被测语义无关。",
+   "evidence_ref": "E14"
+  },
+  {
+   "id": "C16",
+   "source": "agent",
+   "phase": "性能优化",
+   "content": "性能优化先用『按查询形状差分计时』定位，而不是凭直觉改代码：同一张 1 万行、128 维的表上分别测『扫描+整数排序键』『扫描+过滤+整数排序键』『扫描+距离+top-k』『只扫一行』四种查询。结果显示距离核（AVX2）几乎不花时间，真正的开销是每行都要经过的通用机制：通用的 Candidate 结构、每行构造的 ResultCell（含 string 与 vector）、以及过滤条件的通用比较路径。据此做了三处改动：(1) 单个数值排序键 + LIMIT 的查询走专用循环，直接算键、不构造通用候选对象；(2) 常见的过滤形状（列与字面量比较、AND 组合）用专用表示求值，不再逐行构造操作数；(3) 扫描路径复用解码缓冲，向量按块 memcpy 而不是逐个 float 读取。改完必须重跑差分测试：专用堆的比较器一度把主键并列的次序写反，被固定用例抓到。",
+   "evidence_ref": "E15"
+  },
+  {
+   "id": "C17",
+   "source": "agent",
+   "phase": "验证纠错",
+   "content": "这一轮的问题报告只有一句『某几条语句结果不对』，无法定位。改用『逐语句状态追踪』：参照模型在每条语句后记录全表快照，驱动器在每条语句后额外发一条 SELECT 核对全表状态，第一次出现差异的位置就是破坏状态的那条语句，再用它前后的语句上下文缩小到具体操作。这一步把『结果不一致』变成了『第 207 条语句（全表 UPDATE）之后，表少了几行』，进而指向『UPDATE 在扫描树的同时修改树』这一类问题，而不是继续在结果上猜。",
+   "evidence_ref": "E17"
+  },
+  {
+   "id": "C18",
+   "source": "agent",
+   "phase": "验证纠错",
+   "content": "把 AddressSanitizer/UndefinedBehaviorSanitizer 变成常规验证的一环，而不是只在怀疑内存错误时才编译一次。做法很简单：同一份源码换 -fsanitize=address,undefined 编译，跑固定用例与差分测试各若干种子。它立刻报出一个真实缺陷：溢出链读取时把行数据 memcpy 进了一个还没申请大小的 std::string，栈上 SSO 缓冲区被写穿——这类错误在普通构建里往往表现为『数据莫名其妙不对』，很难联想到内存越界。",
+   "evidence_ref": "E19"
+  },
+  {
+   "id": "C19",
+   "source": "agent",
+   "phase": "根因分析",
+   "content": "对『提交后重启，行不见了』这类现象，坚持从机制上倒推而不是打补丁：现象是页被标记为脏却没有落盘；机制上缓冲池的 flush_all 逐帧调用 flush_page，而 flush_page 先用页号查页表，查不到就直接返回——也就是说，只要页表里某个页号被误删，这个页就永远写不回去。于是问题变成『谁会误删页表项』：翻页缓存的 drop 与 load_frame 后发现，drop 只清了 valid/dirty/pin_count，帧上还留着旧页号；帧被复用给别的页时，代码按旧页号去删页表项，删掉的却是新页的映射。修复有两处：drop 时清掉页号；复用帧时只删『该帧确实持有过的那个页』的映射。",
+   "evidence_ref": "E18"
+  },
+  {
+   "id": "C20",
+   "source": "agent",
+   "phase": "知识迁移",
+   "content": "把『差分测试』这条方法继续迁移到两个新场景，验证它与被测对象无关：(1) 深树场景——随机顺序插入 3 万行，逼着叶页反复分裂、树长到三层，覆盖『父页也满了要再分裂』这条几乎走不到的路径；(2) 存储介质场景——同一份脚本用 MINIVECTORDB_DISABLE_CACHE=1 关掉内存镜像再跑一遍，逼着查询走页缓冲的磁盘路径。两个场景都用同一套判定逻辑（点查若干行 + 全表计数），说明方法确实可以照搬到新的语义维度上。",
+   "evidence_ref": "E23"
+  }
+ ],
+ "experiments": [
+  {
+   "id": "E1",
+   "source": "tool",
+   "purpose": "确认赛题原文的硬约束（尤其是『不得使用现成存储引擎/向量索引库』与『数据量可能超过内存限额』）",
+   "command": "python3 提取脚本：从语雀 HTML 中定位 JSON.parse(decodeURIComponent(\"...\")) 并解码 appData，取 doc._cachedContent._cache_decrypted_body",
+   "output": "本题要求实现一个轻量向量数据库 MiniVectorDB……允许使用通用文件、序列化、数学及 SQL 解析库。存储、查询执行、向量索引和事务核心须自行实现，不得使用 SQLite、RocksDB 等现成存储或数据库引擎，也不得调用 Faiss、VSAG、HNSWlib 等现成向量索引库代执行。",
+   "conclusion": "确认必须自研存储引擎与索引；同时确认这是数据库内核方向赛题，需要按可评分的工程标准交付。"
+  },
+  {
+   "id": "E2",
+   "source": "tool",
+   "purpose": "确认配套测试驱动/题包是否已经发布",
+   "command": "git ls-remote --heads upstream 2026-competition-round2 && git ls-tree -r upstream/2026-competition-round2",
+   "output": "c842a368c3394748d0499386c18f6b465242e141 refs/heads/2026-competition-round2；该分支共 37 个文件，含根目录的空 Dockerfile 与空 conversation.json，无任何题包、驱动或公开用例。",
+   "conclusion": "题包未发布，协议细节无法从仓库获得；因此把协议参数化并写进 docs/PROTOCOL.md，作为可被适配的交付物。"
+  },
+  {
+   "id": "E3",
+   "source": "tool",
+   "purpose": "验证『页级 undo 日志 + 提交强制落盘』的恢复路径是否真的能把未提交事务回滚掉",
+   "command": "python3 tests/run_tests.py --binary build/minivectordb（用例 06_recovery_uncommitted：BEGIN 后 INSERT，再 SIGKILL，重启后查询）",
+   "output": "06_recovery_uncommitted.sql 期望输出：MiniVectorDB ready / -- MVDB-END -- ×4 / ERROR 1146 table '' does not exist / -- MVDB-END -- / MiniVectorDB ready / id\tname / 1\tone / -- MVDB-END --",
+   "conclusion": "强杀后未提交的那一行消失了、已提交的那一行还在，恢复语义符合赛题要求。"
+  },
+  {
+   "id": "E4",
+   "source": "tool",
+   "purpose": "定位首次运行即段错误的根因",
+   "command": "gdb -batch -ex run -ex bt --args ./build/minivectordb --data-dir /tmp/mvdata < tests/smoke.sql",
+   "output": "Program received signal SIGSEGV / #1 basic_string::_M_assign / #2 mvdb::Engine::execute_insert(mvdb::Statement const&, mvdb::ResultSet*) ()",
+   "conclusion": "崩溃点在插入路径。随后定位到两处真实缺陷：(a) PageCache 从未按容量分配 frame，导致取页失败后越界；(b) 值列下标计算把所有列都计入，VARCHAR 值写进了越界的 strings 元素。修复为按容量 resize frames_，并统一改用 value_position() 映射值列下标。"
+  },
+  {
+   "id": "E5",
+   "source": "tool",
+   "purpose": "验证函数调用形式的表达式（L2_DISTANCE）能否被解析",
+   "command": "MINIVECTORDB_DEBUG_TOKENS=1 ./build/minivectordb（输入 SELECT L2_DISTANCE(v, 1) FROM t;）",
+   "output": "[tok] type=1 text='SELECT' / [tok] type=1 text='L2_DISTANCE' / [tok] type=4 text='(' 之后 token 流中断，语句报 ERROR 1146 table '' does not exist",
+   "conclusion": "解析器在判断『是不是函数调用』时还没消费标识符就去看下一个 token 是否为 '('，导致 L2_DISTANCE 被当成普通列、后面的 FROM 也丢了。改为先消费标识符再判断左括号。"
+  },
+  {
+   "id": "E6",
+   "source": "tool",
+   "purpose": "验证多行 INSERT 触发 B+tree 分裂时的正确性",
+   "command": "生成 300 行（每行 128 维向量）的 INSERT 后执行 SELECT ... ORDER BY distance LIMIT 10",
+   "output": "ERROR 1105 parent page does not reference the left child",
+   "conclusion": "根因是 find_leaf 把叶子页也压入了下降路径，导致 insert_into_parent 拿到的是叶子而不是父页。改为只记录内部页后分裂与父页插入全部正确，向量 TopK 结果与暴力计算一致。"
+  },
+  {
+   "id": "E7",
+   "source": "tool",
+   "purpose": "量化只读语句提交开销对性能的影响",
+   "command": "python3 tests/bench.py --binary build/minivectordb（1 万行 128 维，1000 次 TopK）",
+   "output": "优化前：write time 0.963 s，query time 11.437 s，query io 11.72 MiB；优化后：write time 0.737 s，query time 1.019 s，query io 0.00 MiB，peak rss 21.25 MiB",
+   "conclusion": "只读语句原本每次都提交（写脏页 + 两次 fdatasync），查询阶段 11.7 MiB 的写全部是这次多余的提交产生的。改为只读事务不落盘后，查询阶段零 I/O、耗时下降一个数量级。"
+  },
+  {
+   "id": "E8",
+   "source": "tool",
+   "purpose": "全量回归",
+   "command": "python3 tests/run_tests.py --binary build/minivectordb",
+   "output": "13 case(s), 0 failure(s)（覆盖 DDL/DML、向量检索、事务、崩溃恢复、语句原子性、错误码、unicode、向量索引、5000 行大数据集、1KiB 缓存预算低内存路径）",
+   "conclusion": "本地功能回归全部通过；这是提交前的准入自检，不等价于官方 MySQL case 全通过。"
+  },
+  {
+   "id": "E9",
+   "source": "tool",
+   "purpose": "验证『一条语句失败时不留下部分修改』这条语义（多行 INSERT 的第二行违反主键唯一）",
+   "command": "python3 tests/run_tests.py --binary build/minivectordb（用例 15_atomicity_large_row）",
+   "output": "INSERT INTO t VALUES (2, 'b', '[0,1]'), (1, 'dup', '[1,1]');  → ERROR 1062 duplicate primary key value；随后的 SELECT id FROM t ORDER BY id 只返回 1（第一行没有留下）",
+   "conclusion": "第一次实现时该用例是『侥幸』通过的：失败发生在页被修改之前。复查代码发现回滚读取 undo 日志前没有先把写缓冲刷到文件，被缓冲的撤销记录读不到，于是语句级回滚在一般情况下会失效。修复为 rollback_to() 先 flush undo 日志再读记录，并补了这条用例固定该行为。"
+  },
+  {
+   "id": "E10",
+   "source": "tool",
+   "purpose": "在协议未公布的前提下，验证『驱动端不带分号逐行发送语句』时数据库不会卡死",
+   "command": "python3 脚本：向 minivectordb 的 stdin 逐行写入不带 ';' 的 CREATE TABLE / INSERT / SELECT 并逐条读回答案",
+   "output": "ready: ['MiniVectorDB ready'] / ddl: ['-- MVDB-END --'] / insert: ['-- MVDB-END --'] / select: ['id', '1', '-- MVDB-END --'] / exit code: 0",
+   "conclusion": "主循环改成 poll() 驱动：读到完整的 ';' 语句立即执行；若输入空闲 250ms 且待执行文本本身是一个能解析成功的完整语句，则执行它。这样既不破坏以 ';' 为边界的协议，也能兼容逐行驱动的协议。"
+  },
+  {
+   "id": "E11",
+   "source": "tool",
+   "purpose": "用独立的参照模型验证随机操作序列下的语义（而不是用数据库自己的输出当期望值）",
+   "command": "python3 tests/fuzz.py --binary build/minivectordb --iterations 400 --seed 1..8",
+   "output": "修复前：FAIL statement 15: SELECT id, category FROM t WHERE category = 'beta' ORDER BY id LIMIT 1;  expected: ['id\\tcategory', '2\\tbeta']  actual: ['id\\tcategory', '3\\tbeta']；修复后：PASS: 401 statements, the database agrees with the reference model（8 个随机种子全部通过，共 3200 条语句）",
+   "conclusion": "这是本次开发最有价值的一次验证：用例期望值来自被测系统本身会掩盖语义错误；差分测试用独立模型发现了 TopK 排序方向写反的严重缺陷。修复后 8 个种子、3200 条随机语句全部与参照模型一致。"
+  },
+  {
+   "id": "E12",
+   "source": "tool",
+   "purpose": "用事务模式的差分测试验证提交/回滚后的可见状态",
+   "command": "python3 tests/fuzz.py --binary build/minivectordb --mode txn --iterations 300 --seed 1..8",
+   "output": "修复前：FAIL statement 69: SELECT id, category FROM t ORDER BY id;  expected: ['id\\tcategory', ...'7\\talpha', '9\\talpha']  actual: [... '7\\talpha', '8\\tgamma', '9\\talpha']（回滚后多出一行未提交的数据）；修复后：8 个种子全部 PASS，合计约 4400 条语句与参照模型一致",
+   "conclusion": "事务语义在两个层面同时被验证：磁盘页由 undo 日志恢复，内存镜像由丢弃重建恢复。"
+  },
+  {
+   "id": "E13",
+   "source": "tool",
+   "purpose": "定位一个只在优化构建下出现的退出崩溃",
+   "command": "gdb -batch -ex 'break __stack_chk_fail' -ex run -ex 'bt 12' -ex 'info frame' --args ./build/minivectordb --data-dir /tmp/mvb2",
+   "output": "Breakpoint 1, __stack_chk_fail () at ./debug/stack_chk_fail.c:23  #1 0x000055555555b89b in main ()  Stack level 0, frame at 0x7fffffffdf70（栈帧约 9.4 KiB，对应 main 里 8 KiB 的读缓冲区）",
+   "conclusion": "真正的根因不是栈越界，而是 Makefile 没有头文件依赖：改过 engine.h 之后旧的目标文件没有重编，链接出来的可执行文件里 Engine 的成员布局有两个版本，函数按错误的偏移写成员，越界写到了 main 的栈上。给 Makefile 加上 -MMD -MP 的自动依赖后问题消失；测试驱动也补上了对退出码的检查，避免再出现『用例全绿但进程异常退出』。"
+  },
+  {
+   "id": "E14",
+   "source": "tool",
+   "purpose": "把差分测试方法迁移到崩溃恢复场景：随机写序列中途 SIGKILL，重启后核对已提交数据",
+   "command": "python3 tests/fuzz.py --binary build/minivectordb --mode recover --iterations 80 --seed 1..40",
+   "output": "recover mode: 40 passed, 0 failed (40 seeds x 80 statements)（中途曾因期望值下标错位报 3 次失败，修正为 states[k-1]/states[k] 后全部通过）",
+   "conclusion": "崩溃恢复在 3200 条随机语句、每次随机强杀一次的前提下，『已提交数据一条不少、被中断语句至多部分生效』这条性质成立；这也是把『用独立参照模型判定』这一方法迁移到新场景的验证。"
+  },
+  {
+   "id": "E15",
+   "source": "tool",
+   "purpose": "用查询形状差分计时定位查询路径的开销，并验证优化效果",
+   "command": "对同一张 1 万行 128 维的表分别计时四种查询形状（扫描+整数键、扫描+过滤+整数键、扫描+距离+top-k、只扫一行），优化前后各测一轮；再用 tests/bench.py 跑完整负载",
+   "output": "优化前：scan+intkey+heap 0.572 ms、scan+filter+intkey+heap 0.811 ms、scan+dist+heap 0.598 ms、scan only 0.066 ms；优化后：0.236 / 0.451 / 0.482 / 0.068 ms；完整负载的查询阶段由 0.99 s 降到 0.70 s（1000 次 top-k，约 1430 次/秒）",
+   "conclusion": "距离核不是瓶颈，通用机制才是；专用化之后查询阶段快了约 29%，写阶段与内存占用不变（0.71 s / 21 MiB）。"
+  },
+  {
+   "id": "E16",
+   "source": "tool",
+   "purpose": "验证『数据量超过内存限额』时数据库仍然可用（赛题的硬性要求）",
+   "command": "python3 tests/large_data.py --binary build/minivectordb --rows 100000（缓存预算 16 MiB、缓冲池 8 MiB，向量载荷 48.8 MiB）",
+   "output": "rows: 100000 / vector payload: 48.8 MiB / write time: 3.45 s (28993 rows/s) / query time: 20.82 s (10 queries/s) / data written: 206.9 MiB / peak rss: 15.2 MiB / row after restart: 100000 (expected 100000)",
+   "conclusion": "数据量是内存限额的三倍时，峰值常驻内存仍只有 15.2 MiB，查询改为从页缓冲流式读取，重启后数据完整。同一实验第一次跑出 26.9 s 的查询阶段，定位到每行解码时逐个 float 读取与逐行分配缓冲，改为整块 memcpy 与复用缓冲后降到 20.8 s。"
+  },
+  {
+   "id": "E17",
+   "source": "tool",
+   "purpose": "用逐语句状态追踪把『结果不一致』缩小到第一条破坏状态的语句",
+   "command": "python3 .tmp/trace.py 4 300（MINIVECTORDB_DISABLE_CACHE=1 MINIVECTORDB_CHECK_PAGES=1）：每条语句后追加一次全表 SELECT，与参照模型快照比对",
+   "output": "FIRST DIVERGENCE after statement 207: UPDATE t SET category = 'beta'; expected 50 rows, got 50; missing: ['38\\tbeta', '39\\tbeta', '41\\tbeta', '42\\tbeta'] extra: ['38\\t', '39\\t', '41\\t', '42\\t']",
+   "conclusion": "破坏状态的是一条全表 UPDATE：它把 4 行的类别改错了。原因是 UPDATE 扫描叶页的同时让叶页压缩重排了槽数组，扫描的下标与槽数组错位，同一行被写了两次而另一行一次都没被写到。修复：压缩时若页上有扫描在跑就保持槽数组布局不动；UPDATE 先收集命中主键再统一写回。"
+  },
+  {
+   "id": "E18",
+   "source": "tool",
+   "purpose": "定位『ROLLBACK 之后写入的行永久丢失』的机制",
+   "command": "复现序列：CREATE TABLE; BEGIN; INSERT×2; UPDATE; SELECT; ROLLBACK; SELECT; INSERT; SELECT —— 逐步检查页表、脏页计数与落盘结果",
+   "output": "DEBUG commit txn=3 changes=1 dirty=1；随后 flush_all frame=0 page=2 mapped=0 → flush_page page=2 is not mapped（页在帧里是脏的，但页表里没有它，于是永远写不回文件）；落盘后的叶页 slots=0，而内存里刚刚成功插入了 key=3",
+   "conclusion": "缓冲池的页表被误删：drop 只清了帧的 valid/dirty/pin_count，帧上仍留旧页号；该帧被复用时按旧页号删页表项，删掉的正是仍被持有的新页。修复后同一序列落盘为 slots=1（key 3），全表查询也能看到该行。"
+  },
+  {
+   "id": "E19",
+   "source": "tool",
+   "purpose": "用 AddressSanitizer 检查溢出链读取路径",
+   "command": "g++ -fsanitize=address,undefined 编译后跑固定用例与差分测试（seed 1..5、txn、recover）",
+   "output": "ERROR: AddressSanitizer: stack-buffer-overflow ... WRITE of size 32 ... in mvdb::BTree::read_payload btree.cpp:379；payload 对象位于栈帧 [368,400)，写入越过对象末尾",
+   "conclusion": "溢出链分支直接 memcpy 进还没 resize 的 std::string，SSO 缓冲区被写穿，并且把 string 自身的指针写坏，随后 append 就写到栈上别的变量里。修复：读取前先 payload->resize(length)。修复后 ASAN/UBSan 全套（19 个固定用例 + 差分三模式）零报错。"
+  },
+  {
+   "id": "E20",
+   "source": "tool",
+   "purpose": "定位宽差分扫描报出的 ‘truncated overflow chain’",
+   "command": "python3 tests/fuzz.py --iterations 400 --seed 41（MINIVECTORDB_CHECK_PAGES=1）",
+   "output": "FAIL statement 377: ... expected: ['id\\tdistance'] actual: ['ERROR 1814 truncated overflow chain for row']",
+   "conclusion": "两个叠加缺陷：(1) 溢出链的页是用 write_page 直接写文件的，绕过了缓冲池，缓冲池里那个脏帧在提交时把链页覆盖成了空闲页；(2) 链是反向串的（每页的 next 指回首节点），超过一页的行永远读不全。修复：链页与链的读取都走缓冲池，链按正向串联。"
+  },
+  {
+   "id": "E21",
+   "source": "tool",
+   "purpose": "定位 ROLLBACK 之后树结构失效导致的无限递归",
+   "command": "ASAN 构建下跑 tests/cases/19_rollback_data.sql（新增用例：事务回滚后继续写入）",
+   "output": "ERROR: AddressSanitizer: stack-overflow ... 递归栈全部是 mvdb::BTree::scan_page btree.cpp:1132（读到一个类型不是 leaf/internal 的页，把它的槽当成孩子继续下探）",
+   "conclusion": "回滚把页恢复成了『尚未分配』的全零页，而内存里树的根页号还指着它；同时任何未知类型的页都会被当成内部页递归下去。修复：未知页类型直接报存储损坏错误而不是继续下探；回滚时连同每张表的根页号与行数一起恢复到语句/事务开始时的状态（这两项原本不在页里，只存在于内存）。"
+  },
+  {
+   "id": "E22",
+   "source": "tool",
+   "purpose": "宽差分扫描：确认修复之后没有新的分歧",
+   "command": "basic 模式 seed 1..60（开/关内存镜像两种）、txn 模式 seed 1..30（两种）、recover 模式 seed 1..30，每条 300~400 条语句，开启 MINIVECTORDB_CHECK_PAGES 页不变量检查",
+   "output": "basic sweep done (fail=0)；txn/recover sweep done (fail=0)；wide sweep done (fail=0)",
+   "conclusion": "在 60+30+30 个种子、两种缓存模式、三种差分模式、共两万条以上随机语句下，数据库与参照模型完全一致，页不变量检查也没有触发。"
+  },
+  {
+   "id": "E23",
+   "source": "tool",
+   "purpose": "验证多层树的分裂路径（含父页分裂）与磁盘扫描路径",
+   "command": "python3 tests/bigtree.py --rows 30000（随机顺序插入 → 572 个叶页、三层树），并在关闭内存镜像时重跑一遍；另用脚本统计树深度",
+   "output": "PASS: 30000 rows, the tree grows over several levels and every row is found again；rows=30000 pages=580 leaves=572 depth=2 internal slot counts=[3, 136, 139, 145, 148]",
+   "conclusion": "三层树（根 → 内部页 → 叶页）下插入、删除、更新后，每一行都能被点查回来，计数也正确；内部页的槽数逼近 253 的上限，说明『父页满了先分裂父页、再把分隔键放进拥有该孩子的那一半』这条路径被真实走到了。"
+  },
+  {
+   "id": "E24",
+   "source": "tool",
+   "purpose": "确认修复没有引入性能回退",
+   "command": "python3 tests/bench.py（1 万行 128 维、1000 次 top-k）；python3 tests/large_data.py --rows 100000",
+   "output": "bench: write 0.925 s / query 0.721 s / peak rss 21.30 MiB；large_data: write 6.31 s / query 29.35 s (200 次查询) / peak rss 15.0 MiB / 重启后 100000 行完整",
+   "conclusion": "修复后性能与之前持平：查询阶段仍是 0.72 s（约 1390 次/秒），内存占用不变；数据量是内存限额三倍时峰值常驻仍只有 15 MiB。"
+  }
+ ],
+ "retrospective": {
+  "problem_understanding": "真正的难点不是把 SQL 跑通，而是两个外部依赖：一个是评测协议未公布，另一个是崩溃恢复的原子性。协议用参数化隔离解决；原子性用『页级前镜像 undo 日志 + 语句级 savepoint』解决，并用 SIGKILL 用例反复验证。",
+  "technical_transfer": "把数据库课上的页式存储、 slotted page、B+tree 分裂与 ARIES 的 undo/redo 概念迁移到一个没有框架的 C++17 实现上；把 LSM 的写放大意识用在 undo 日志设计上（选择页级镜像而不是行级 redo，是用写放大换实现与验证成本）。",
+  "independent_verification": "所有结论都用可复现的工具输出确认：段错误用 gdb 定位，解析问题用 token dump 定位，性能问题用自己写的 benchmark 前后对比，退出崩溃用 __stack_chk_fail 断点加栈帧分析定位。最重要的一次是引入差分测试 tests/fuzz.py：用 Python 参照模型独立计算随机语句序列的期望结果，并在此基础上又加了事务模式（随机 BEGIN/COMMIT/ROLLBACK 组合，每步校验可见状态）。此前我的用例期望文件是直接录制数据库输出生成的，这只能证明『没有变化』而不能证明『语义正确』；差分测试第一次就抓到了 TopK 有界堆比较方向写反这种会让所有 ORDER BY+LIMIT 查询返回错误结果、而用例却全部通过的缺陷，第二次抓到回滚没有恢复内存镜像、导致回滚后仍能读到未提交数据的问题。另外补上了测试驱动对进程退出码的检查——之前『用例全绿但进程以 134 退出』的情况会被完全忽略。",
+  "experiment_iteration": "本轮把差分测试从『比对查询结果』升级为『每条语句后比对全表状态』，于是失败可以被定位到第一条破坏状态的语句；随后又加上页不变量检查（MINIVECTORDB_CHECK_PAGES）与 ASAN/UBSan，三者互相印证：页不变量检查能抓页内结构错误，ASAN 抓越界，逐语句比对抓语义分歧。最后用 60+30+30 个种子、两种缓存模式、三种模式做宽扫描确认收敛。",
+  "tradeoffs": "正确性优先于速度：把溢出链改为走缓冲池、多加一次事务/语句级表状态快照，都带来了一点额外开销，但换来了『回滚之后仍然可写』『长行不会丢』这些性质。同时保持查询路径的专用循环不变，最终基准与修复前持平（查询 0.72 s、内存 21 MiB）。",
+  "remaining_questions": "题包发布后需要按其约定核对协议；官方 MySQL case 与公开样例的题包尚未获取，功能准入结果未知；ann 模式目前返回精确结果，若官方用例要求近似语义需要再评估。",
+  "self_correction": "本轮最大的纠错是承认『之前的修复可能只是掩盖了症状』：上一轮把 seed 4 的失败归因于『UPDATE 期间的压缩重排了槽数组』，但真正让数据永久丢失的是缓冲池页表被误删。定位方法的改变是关键：不再从『结果不对』倒推，而是先写出『页被标记为脏却没有落盘』这一可观测中间状态，再顺着 flush_all → flush_page → 页表查找这条链路推下去，才发现 drop 留下的旧页号会删掉别人的映射。另一个纠错是把 ASAN 从『怀疑内存错误时才编译』变成常规验证的一环，它直接报出了溢出链读取时写穿 std::string 的越界。",
+  "prompt_design": "赛题的自然语言要求先被翻译成可判定的验收清单，再按清单实现和写用例，清单同时是实现顺序和测试目录。给工具与 Agent 的调试指令也经历了几轮重写：gdb 看栈而不是猜、给解析器加 token dump、把 kill 用例加上同步标记消除竞态、把判定标准从『比对录制输出』换成『比对独立参照模型』、再把差分测试扩展到事务与崩溃恢复两个模式。每一次改写都是因为上一轮的输出不足以定位问题，属于指令与观测手段的迭代，而不是重复执行同一条指令。",
+  "knowledge_transfer": "差分测试最初针对普通语句的语义，随后被迁移到事务语义（随机 BEGIN/COMMIT/ROLLBACK，每步校验可见状态）和崩溃恢复（随机写序列中途强杀，重启后核对已提交数据）两个新场景，三者共用同一个参照模型与同一套判定逻辑，说明方法与被测语义解耦。40 个随机种子 × 80 条语句的恢复模式全部通过。另一处迁移是存储层面的：页级前镜像 undo 日志最初为表数据设计，后来同样用在目录页与 undo 日志自身的页上，使恢复路径只有一条。"
+ },
+ "limitations": {
+  "not_executed": [
+   "没有在真实的 Linux x86_64 容器里跑过：开发环境是 Windows + WSL2（Ubuntu 24.04），cgroup 内存限额是通过读 /sys/fs/cgroup/memory.max 推算的，没有真容器的限额值参与测试。",
+   "没有用官方 MySQL case 与官方 benchmark 跑过（题包未公布），目前的判据是自建的 19 个固定用例、差分测试三模式、大树压力测试与本地 benchmark。"
+  ],
+  "known_gaps": [
+   "赛题的正式题包与协议尚未公布，当前协议按可配置方式实现（--protocol/--ready-message/--result-terminator），若官方协议不同需要改配置而不是改代码。",
+   "只支持一个显式事务，不支持嵌套事务与 SAVEPOINT；回滚粒度是语句级与事务级两档。",
+   "不支持 NULL、连接、聚合、子查询、ALTER TABLE、外键，遇到时返回错误而不是猜测语义。",
+   "向量检索是精确检索，ann 模式与 exact 模式返回相同结果（召回率 1.0），没有做近似候选生成。",
+   "叶页删除后不做相邻页合并，删除密集的表会因为空洞而略早分裂。",
+   "撤销日志在提交后才截断，触碰页很多的事务会占用与页数成正比的磁盘空间。",
+   "本轮修复了页级撤销日志的若干缺陷，但事务隔离级别仍只有读已提交，不支持可重复读。"
+  ],
+  "self_correction": "上一轮材料里写的『压测与差分测试已全部通过』在本轮被推翻：更宽的种子扫描（seed 41 等）与 ASAN 都报出了新缺陷，说明当时的结论受限于种子范围。这轮的结论改为给出可复现的证据：命令、种子范围、失败输出与修复后的对照，而不是一句『通过』。"
+ }
 }

@@ -128,6 +128,7 @@ python3 tests/run_tests.py --binary build/minivectordb
 python3 tests/fuzz.py --binary build/minivectordb --iterations 400 --seed 1
 python3 tests/fuzz.py --binary build/minivectordb --mode txn --iterations 300 --seed 1
 python3 tests/fuzz.py --binary build/minivectordb --mode recover --iterations 80 --seed 1
+python3 tests/bigtree.py --binary build/minivectordb --rows 30000
 make bench                 # runs the performance benchmark
 python3 tests/large_data.py --binary build/minivectordb --rows 100000
 ```
@@ -147,7 +148,16 @@ sequences and compares the answers of the database with a reference model
 that implements the same semantics in python.  `--mode txn` generates random
 transaction sequences and checks the visible state after every statement,
 `--mode recover` kills the server in the middle of a random write sequence,
-restarts it and checks that the committed data survived.
+restarts it and checks that the committed data survived.  The environment
+variable `MINIVECTORDB_DISABLE_CACHE=1` switches the in memory mirror off,
+so that the same sequence runs through the pages of the buffer pool, and
+`MINIVECTORDB_CHECK_PAGES=1` checks the invariants of every page that the
+engine writes.
+
+`tests/bigtree.py` writes 30,000 rows with random keys, so that the leaf
+pages are split again and again and the tree grows over three levels.  It
+then deletes and updates rows and checks that every row that is still alive
+is found again, with and without the in memory mirror.
 
 ## Documentation
 
