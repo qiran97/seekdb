@@ -92,8 +92,19 @@ class Database:
         self.tables[name] = []
         return []
 
+    def drop(self, name):
+        if name not in self.tables:
+            return ["ERROR 1146 table '%s' does not exist" % name]
+        del self.tables[name]
+        return []
+
+    def missing(self, name):
+        return ["ERROR 1146 table '%s' does not exist" % name]
+
     # --- data ------------------------------------------------------------
     def insert(self, name, key, category, vector):
+        if name not in self.tables:
+            return self.missing(name)
         rows = self.tables[name]
         for row in rows:
             if row[0] == key:
@@ -103,6 +114,8 @@ class Database:
 
     def update(self, name, key, category=None, vector=None):
         # A key of None updates every row of the table.
+        if name not in self.tables:
+            return self.missing(name)
         rows = self.tables[name]
         for index, row in enumerate(rows):
             if key is not None and row[0] != key:
@@ -114,6 +127,8 @@ class Database:
 
     def delete(self, name, key):
         # A key of None deletes every row of the table.
+        if name not in self.tables:
+            return self.missing(name)
         rows = self.tables[name]
         if key is None:
             self.tables[name] = []
@@ -163,6 +178,8 @@ class Database:
 
     def select(self, name, terms, order_column, descending, limit, offset,
                columns):
+        if name not in self.tables:
+            return self.missing(name)
         rows = self.filter_rows(name, terms)
         if order_column is not None:
             rows = self.order_rows(rows, order_column, descending)
@@ -177,6 +194,8 @@ class Database:
         return rows
 
     def distance_rows(self, name, terms, target, descending, limit):
+        if name not in self.tables:
+            return self.missing(name)
         rows = self.filter_rows(name, terms)
         scored = []
         for row in rows:
@@ -219,9 +238,15 @@ def generate(rng, iterations):
     )
     expected.append(model.create(table))
 
-    next_key = 1
+    # The statements run on several tables, a table is created and dropped
+    # from time to time.
+    tables = [table]
+    next_keys = {table: 1}
+    next_table_id = 1
     for _ in range(iterations):
         choice = rng.random()
+        table = rng.choice(tables)
+        next_key = next_keys[table]
 
         if choice < 0.30:
             # Insert with and without an explicit column list.
@@ -248,6 +273,7 @@ def generate(rng, iterations):
                     "('%s', %d, '%s');" % (table, category, key, literal)
                 )
             expected.append(model.insert(table, key, category, vector))
+            next_keys[table] = next_key
 
         elif choice < 0.42:
             # Update of one or two columns, with or without a where clause.
@@ -286,7 +312,26 @@ def generate(rng, iterations):
                 statements.append("DELETE FROM %s;" % table)
                 expected.append(model.delete(table, None))
 
-        elif choice < 0.64:
+        elif choice < 0.68:
+            # A new table is created or an existing one is dropped.
+            if rng.random() < 0.5 or len(tables) == 1:
+                name = "u%d" % next_table_id
+                next_table_id += 1
+                statements.append(
+                    "CREATE TABLE %s (id BIGINT PRIMARY KEY, category "
+                    "VARCHAR(16), embedding VECTOR(%d));" % (name, DIM)
+                )
+                expected.append(model.create(name))
+                tables.append(name)
+                next_keys[name] = 1
+            else:
+                name = rng.choice(tables)
+                statements.append("DROP TABLE %s;" % name)
+                expected.append(model.drop(name))
+                tables.remove(name)
+                next_keys.pop(name, None)
+
+        elif choice < 0.74:
             # A duplicate key has to be rejected.
             key = rng.randint(1, max(next_key, 2))
             category = rng.choice(CATEGORIES)
@@ -297,14 +342,14 @@ def generate(rng, iterations):
             )
             expected.append(model.insert(table, key, category, vector))
 
-        elif choice < 0.70:
+        elif choice < 0.78:
             # An unknown column has to be rejected.
             statements.append(
                 "SELECT id FROM %s WHERE no_such_column = 1;" % table
             )
             expected.append(["ERROR 1054 unknown column 'no_such_column'"])
 
-        elif choice < 0.76:
+        elif choice < 0.82:
             # A vector literal with the wrong dimension has to be rejected.
             key = next_key
             next_key += 1
@@ -313,7 +358,7 @@ def generate(rng, iterations):
             )
             expected.append(["ERROR 1525 vector dimension mismatch: expected 4, got 3"])
 
-        elif choice < 0.88:
+        elif choice < 0.91:
             # A select with a filter, an order and a limit.
             terms = []
             if rng.random() < 0.6:
