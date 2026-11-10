@@ -126,6 +126,11 @@ struct Statement {
 
 // Parses a single statement.  Returns kSyntaxError for malformed input.
 Status parse_statement(const std::string& sql, Statement* out);
+// Parses the first statement of the text and reports how many characters it
+// used.  It is used by the server to run a statement that a driver sent
+// without a semicolon.
+Status parse_first_statement(const std::string& sql, Statement* out,
+                              size_t* length);
 
 // Splits a script into individual statements.  Semicolons inside string
 // literals and comments do not terminate a statement.

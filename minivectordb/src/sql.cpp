@@ -41,6 +41,7 @@ class Lexer {
 
   bool next(Token* token, Status* error) {
     skip_space_and_comments();
+    token_start_ = pos_;
     if (pos_ >= text_.size()) {
       token->type = TokenType::kEnd;
       return true;
@@ -53,6 +54,8 @@ class Lexer {
   }
 
   size_t position() const { return pos_; }
+  // The offset of the token that was read last.
+  size_t token_start() const { return token_start_; }
 
  private:
   bool is_ident_start(char c) const {
@@ -188,6 +191,7 @@ class Lexer {
 
   const std::string& text_;
   size_t pos_ = 0;
+  size_t token_start_ = 0;
 };
 
 class Parser {
@@ -195,6 +199,9 @@ class Parser {
   explicit Parser(const std::string& sql) : lexer_(sql) {
     advance();
   }
+
+  // The offset of the token that follows the statement that was parsed.
+  size_t position() const { return lexer_.token_start(); }
 
   Status parse(Statement* out) {
     if (token_.type == TokenType::kEnd) {
@@ -872,6 +879,15 @@ Status parse_statement(const std::string& sql, Statement* out) {
   Parser parser(sql);
   Status status = parser.parse(out);
   if (!status.ok()) return status;
+  return Status::Ok();
+}
+
+Status parse_first_statement(const std::string& sql, Statement* out,
+                              size_t* length) {
+  Parser parser(sql);
+  Status status = parser.parse(out);
+  if (!status.ok()) return status;
+  *length = parser.position();
   return Status::Ok();
 }
 

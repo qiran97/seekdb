@@ -20,6 +20,10 @@ struct ServerOptions {
   size_t cache_budget_bytes = 0;  // 0 selects a value based on the cgroup limit
   bool search_mode_ann = false;
   int log_level = 1;
+  // How long the input has to be idle before a statement that does not end
+  // with a semicolon is executed.  A driver that sends the statements with a
+  // semicolon never waits for it.
+  int idle_timeout_ms = 50;
 };
 
 // Splits the incoming byte stream into complete statements.
@@ -29,8 +33,10 @@ class StatementReader {
   bool next(std::string* statement);
   bool flush(std::string* statement);
   // The text that was received but does not contain a statement terminator.
+  // The text is not trimmed, the offsets of the caller refer to the buffer.
   bool pending(std::string* text) const;
-  void consume_pending();
+  // Removes the first `length` characters of the pending text.
+  void consume_pending(size_t length);
 
  private:
   std::string buffer_;

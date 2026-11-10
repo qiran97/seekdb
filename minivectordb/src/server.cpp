@@ -175,15 +175,24 @@ bool StatementReader::next(std::string* statement) {
 }
 
 bool StatementReader::pending(std::string* text) const {
-  std::string value = trim(buffer_.substr(statement_start_));
-  if (value.empty()) return false;
+  std::string value = buffer_.substr(statement_start_);
+  if (trim(value).empty()) return false;
   *text = value;
   return true;
 }
 
-void StatementReader::consume_pending() {
-  statement_start_ = buffer_.size();
-  scan_ = buffer_.size();
+void StatementReader::consume_pending(size_t length) {
+  statement_start_ += length;
+  if (statement_start_ > buffer_.size()) statement_start_ = buffer_.size();
+  // The scanner starts at the text that is left.  The flags of the scanner
+  // describe the state after the text that was scanned, the statement that is
+  // removed is complete and does not leave a literal open.
+  scan_ = statement_start_;
+  // The text that was consumed is removed from the buffer, the buffer does
+  // not grow over the life of the server.
+  buffer_.erase(0, statement_start_);
+  scan_ = 0;
+  statement_start_ = 0;
 }
 
 bool StatementReader::flush(std::string* statement) {
@@ -193,6 +202,25 @@ bool StatementReader::flush(std::string* statement) {
   if (text.empty()) return false;
   *statement = std::move(text);
   return true;
+}
+
+// Takes the next statement out of the text that was received without a
+// semicolon.  A driver that sends one statement per line is supported: the
+// first line that is a complete statement is taken, the rest of the text
+// stays pending.  A statement that spans several lines is taken when the
+// whole text is a complete statement.  The length of the statement is zero
+// when the text does not hold a complete statement yet.
+size_t take_pending_statement(StatementReader* reader, std::string* statement) {
+  std::string pending;
+  if (!reader->pending(&pending)) return 0;
+  size_t length = 0;
+  Statement parsed;
+  Status status = parse_first_statement(pending, &parsed, &length);
+  if (!status.ok() || parsed.type == StatementType::kEmpty) return 0;
+  if (length == 0 || length > pending.size()) length = pending.size();
+  *statement = trim(pending.substr(0, length));
+  reader->consume_pending(length);
+  return length;
 }
 
 void Server::write_line(const std::string& line) {
@@ -327,7 +355,7 @@ int Server::run() {
   // driver that sends one statement per line without a semicolon is also
   // supported: when the input stays idle for a moment and the pending text
   // is a complete statement, it is executed.
-  const int idle_timeout_ms = 250;
+  const int idle_timeout_ms = options_.idle_timeout_ms;
   while (true) {
     struct pollfd descriptor;
     descriptor.fd = 0;
@@ -339,15 +367,10 @@ int Server::run() {
       break;
     }
     if (ready == 0) {
-      std::string pending;
-      if (reader.pending(&pending)) {
-        Statement parsed;
-        Status status = parse_statement(pending, &parsed);
-        if (status.ok() && parsed.type != StatementType::kEmpty) {
-          reader.consume_pending();
-          handle_statement(pending);
-          if (engine_.shutdown_requested()) break;
-        }
+      std::string statement;
+      if (take_pending_statement(&reader, &statement) != 0) {
+        handle_statement(statement);
+        if (engine_.shutdown_requested()) break;
       }
       continue;
     }
@@ -367,7 +390,13 @@ int Server::run() {
       if (engine_.shutdown_requested()) break;
     }
   }
+  // The input ended.  The statements that were received without a semicolon
+  // are executed as well.
   std::string statement;
+  while (take_pending_statement(&reader, &statement) != 0) {
+    handle_statement(statement);
+    if (engine_.shutdown_requested()) break;
+  }
   while (reader.flush(&statement)) {
     handle_statement(statement);
     if (engine_.shutdown_requested()) break;

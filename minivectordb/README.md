@@ -60,6 +60,7 @@ database does not need a TTY and no port has to be published.
 | `--buffer-pool <bytes>` | size of the page cache (default: derived from the cgroup limit) |
 | `--cache-budget <bytes>` | maximum size of the in memory row cache |
 | `--log-level <0..2>` | 0 quiet, 1 info (default), 2 debug |
+| `--idle-timeout-ms <ms>` | how long the input has to be idle before a statement that does not end with a semicolon is executed (default 50) |
 
 The environment variables `MINIVECTORDB_DATA_DIR` and
 `MINIVECTORDB_SEARCH_MODE` provide the same settings.

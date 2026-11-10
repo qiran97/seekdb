@@ -31,9 +31,12 @@ text can be configured with `--ready-message`.
   no output.
 
 A driver that sends one statement per line **without** a semicolon is
-supported as well: when the input stays idle for a moment and the pending
-text is a complete statement, it is executed.  A statement that is sent in
-several pieces is not affected, the semicolon still decides where a
+supported as well: when the input stays idle for a moment (50 milliseconds by
+default, `--idle-timeout-ms`) and the pending text is a complete statement,
+it is executed.  The parser reports where the statement ends, so a text that
+holds several statements is executed statement by statement and a statement
+that spans several lines is executed as one statement.  A statement that is
+sent in several pieces is not affected, the semicolon still decides where a
 statement ends.
 
 ## 3. Answers

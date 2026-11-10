@@ -101,6 +101,13 @@ int main(int argc, char** argv) {
         return 2;
       }
       options.cache_budget_bytes = static_cast<size_t>(value);
+    } else if (argument == "--idle-timeout-ms") {
+      int64_t value = 0;
+      if (!mvdb::parse_int64(next_value("--idle-timeout-ms"), &value) || value < 0) {
+        fprintf(stderr, "minivectordb: invalid --idle-timeout-ms value\n");
+        return 2;
+      }
+      options.idle_timeout_ms = static_cast<int>(value);
     } else if (argument == "--log-level") {
       int64_t value = 0;
       if (!mvdb::parse_int64(next_value("--log-level"), &value)) {
