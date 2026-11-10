@@ -1,0 +1,25 @@
+MiniVectorDB ready
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+id	category
+1	gamma
+2	beta
+-- MVDB-END --
+-- MVDB-END --
+id	category
+-- MVDB-END --
+-- MVDB-END --
+id	category
+3	alpha
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+id	category
+3	alpha
+5	beta
+-- MVDB-END --

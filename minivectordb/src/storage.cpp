@@ -401,12 +401,15 @@ Status PageCache::load_frame(uint64_t page_id, uint32_t* index) {
     if (!status.ok()) return status;
   }
   Frame& frame = frames_[victim];
+  // The frame may still carry the id of a page that it does not hold any
+  // more, the mapping of that page must not be removed.
+  uint64_t old_page_id = frame.valid ? frame.page_id : 0;
   if (!frame.valid) {
     frame.data.assign(kPageSize, 0);
     frame.valid = true;
   }
   lookup_.erase(page_id);
-  if (frame.page_id != 0) lookup_.erase(frame.page_id);
+  if (old_page_id != 0) lookup_.erase(old_page_id);
   frame.page_id = page_id;
   frame.dirty = false;
   frame.pin_count = 0;
@@ -487,9 +490,13 @@ Status PageCache::flush_all() {
 void PageCache::drop(uint64_t page_id) {
   auto it = lookup_.find(page_id);
   if (it == lookup_.end()) return;
-  frames_[it->second].valid = false;
-  frames_[it->second].dirty = false;
-  frames_[it->second].pin_count = 0;
+  Frame& frame = frames_[it->second];
+  frame.valid = false;
+  frame.dirty = false;
+  frame.pin_count = 0;
+  // The page id has to be cleared as well: the frame is reused for another
+  // page later and the stale id would remove the mapping of that page.
+  frame.page_id = 0;
   lookup_.erase(it);
 }
 
@@ -578,6 +585,13 @@ Status Storage::allocate_page(uint32_t type, uint64_t* page_id) {
   uint8_t* page = nullptr;
   Status status = fetch_page(id, &page);
   if (!status.ok()) return status;
+  // The before image of the page has to be logged, a rollback has to be able
+  // to give the page back to the free list.
+  status = note_modification(id, page);
+  if (!status.ok()) {
+    unpin_page(id);
+    return status;
+  }
   memset(page, 0, kPageSize);
   store_u32(page + 0, type);
   store_u32(page + 4, static_cast<uint32_t>(id));
@@ -593,6 +607,11 @@ Status Storage::free_page(uint64_t page_id) {
   uint8_t* page = nullptr;
   Status status = fetch_page(page_id, &page);
   if (!status.ok()) return status;
+  status = note_modification(page_id, page);
+  if (!status.ok()) {
+    unpin_page(page_id);
+    return status;
+  }
   store_u32(page + 0, PageType::kFree);
   store_u32(page + 8, static_cast<uint32_t>(free_list_head_));
   free_list_head_ = page_id;

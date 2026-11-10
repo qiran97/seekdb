@@ -2,6 +2,7 @@
 #include "value.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 
 namespace mvdb {
@@ -106,6 +107,12 @@ Engine::~Engine() { storage_.close(); }
 Status Engine::open(const std::string& data_dir, size_t buffer_pool_bytes,
                     size_t cache_budget_bytes) {
   cache_budget_ = cache_budget_bytes;
+  // The in memory mirror can be switched off, the database then always reads
+  // the clustered index.  It is used by the differential test to tell the two
+  // code paths apart.
+  if (getenv("MINIVECTORDB_DISABLE_CACHE") != nullptr) {
+    cache_disabled_ = true;
+  }
   Status status = storage_.open(data_dir, buffer_pool_bytes);
   if (!status.ok()) return status;
   storage_.cache()->set_before_flush([this]() { return storage_.flush_undo_log(); });
@@ -317,6 +324,15 @@ Status Engine::begin_transaction(uint64_t txn_id) {
                          "a transaction is already active, nested transactions "
                          "are not supported");
   }
+  // The state of the tables is remembered, a rollback of the transaction
+  // restores it.
+  transaction_state_.clear();
+  for (const auto& entry : tables_) {
+    TableState state;
+    state.root_page = entry.second->root_page;
+    state.row_count = entry.second->row_count;
+    transaction_state_[entry.first] = state;
+  }
   in_transaction_ = true;
   current_txn_id_ = txn_id;
   storage_.begin_transaction(txn_id);
@@ -328,6 +344,15 @@ Status Engine::begin_statement(uint64_t* savepoint) {
   if (!status.ok()) return status;
   *savepoint = storage_.undo_log()->position();
   storage_.reset_logged_pages();
+  // The state of the tables is remembered, a rollback of the statement
+  // restores it.
+  statement_state_.clear();
+  for (const auto& entry : tables_) {
+    TableState state;
+    state.root_page = entry.second->root_page;
+    state.row_count = entry.second->row_count;
+    statement_state_[entry.first] = state;
+  }
   return Status::Ok();
 }
 
@@ -377,7 +402,8 @@ Status Engine::apply_undo(const UndoRecord& record) {
   return Status::Ok();
 }
 
-Status Engine::rollback_to(uint64_t savepoint) {
+Status Engine::rollback_to(uint64_t savepoint,
+                           const std::map<std::string, TableState>& state) {
   // The undo records of the statement may still be in the write buffer of the
   // log, they have to reach the file before they can be read back.
   Status status = storage_.flush_undo_log();
@@ -403,12 +429,23 @@ Status Engine::rollback_to(uint64_t savepoint) {
     drop_cache(table);
     table->cache_stale = true;
   }
+  // The root page of a tree and the number of its rows are part of the state
+  // of the table.  A rollback restores them, the pages of the tree are
+  // restored as well and the tree has to point at the root it pointed at
+  // before the statement.
+  for (const auto& entry : state) {
+    auto it = tables_.find(entry.first);
+    if (it == tables_.end()) continue;
+    it->second->root_page = entry.second.root_page;
+    it->second->tree.set_root_page(entry.second.root_page);
+    it->second->row_count = entry.second.row_count;
+  }
   return Status::Ok();
 }
 
 Status Engine::rollback_open_transaction() {
   if (!in_transaction_) return Status::Ok();
-  Status status = rollback_to(0);
+  Status status = rollback_to(0, transaction_state_);
   if (status.ok()) {
     status = storage_.undo_log()->reset();
   }
@@ -580,6 +617,12 @@ Status Engine::decode_row(const Table& table, const std::string& payload,
   if (!reader.u32(&value_count)) {
     return Status::Error(ErrorCode::kStorageCorrupt, "row payload is corrupted");
   }
+  const size_t expected_values = table.def.value_columns().size();
+  if (value_count != expected_values) {
+    return Status::Error(ErrorCode::kStorageCorrupt,
+                         "row payload has " + std::to_string(value_count) +
+                             " values, expected " + std::to_string(expected_values));
+  }
   // The buffers of the caller are reused, a scan over a big table must not
   // allocate for every row.
   out->strings.resize(value_count);
@@ -591,6 +634,13 @@ Status Engine::decode_row(const Table& table, const std::string& payload,
   uint32_t dim = 0;
   if (!reader.u32(&dim)) {
     return Status::Error(ErrorCode::kStorageCorrupt, "row payload is corrupted");
+  }
+  const uint32_t expected_dim = table.def.vector_index >= 0
+                                    ? table.def.columns[table.def.vector_index].dim
+                                    : 0;
+  if (dim != expected_dim) {
+    return Status::Error(ErrorCode::kStorageCorrupt,
+                         "row payload has the wrong vector dimension");
   }
   out->vector.resize(dim);
   if (dim > 0 && !reader.bytes(dim * sizeof(float), out->vector.data())) {
@@ -689,6 +739,7 @@ Status Engine::delete_row(Table* table, int64_t key) {
 Status Engine::build_cache_if_possible(Table* table) {
   if (table->cache_enabled) return Status::Ok();
   if (!table->cache_stale) return Status::Ok();
+  if (cache_disabled_) return Status::Ok();
   table->cache_stale = false;
   size_t per_row = 64;
   for (const ColumnDef& column : table->def.columns) {
@@ -734,13 +785,38 @@ Status Engine::scan_rows(Table* table, const RowVisitor& visitor) {
   }
   // The row and its buffers are reused for every row of the scan.
   RowValues row;
+  Status decode_error = Status::Ok();
   Status status = table->tree.scan([&](uint64_t key, const std::string& data) {
     row.key = static_cast<int64_t>(key);
     Status decode_status = decode_row(*table, data, &row);
-    if (!decode_status.ok()) return false;
+    if (!decode_status.ok()) {
+      // A row that cannot be decoded is an error, the scan must not stop
+      // silently and report a truncated result.
+      decode_error = decode_status;
+      return false;
+    }
     return visitor(row.key, row);
   });
-  return status;
+  if (!status.ok()) return status;
+  return decode_error;
+}
+
+// Reads a single row of a table.
+Status Engine::read_row(Table* table, int64_t key, RowValues* row) {
+  if (table->cache_enabled) {
+    auto it = table->cache.find(key);
+    if (it == table->cache.end()) {
+      return Status::Error(ErrorCode::kInternalError, "the row does not exist");
+    }
+    *row = it->second;
+    row->key = key;
+    return Status::Ok();
+  }
+  std::string payload;
+  Status status = table->tree.lookup(static_cast<uint64_t>(key), &payload);
+  if (!status.ok()) return status;
+  row->key = key;
+  return decode_row(*table, payload, row);
 }
 
 Status Engine::refresh_caches() {
@@ -811,7 +887,7 @@ Status Engine::execute(const Statement& statement, ResultSet* result) {
     }
     case StatementType::kRollback: {
       if (!in_transaction_) return Status::Ok();
-      Status status = rollback_to(txn_start_position_);
+      Status status = rollback_to(txn_start_position_, transaction_state_);
       if (!status.ok()) return status;
       status = storage_.undo_log()->reset();
       if (!status.ok()) return status;
@@ -895,7 +971,7 @@ Status Engine::execute(const Statement& statement, ResultSet* result) {
   if (!status.ok()) return status;
   status = dispatch(statement, result);
   if (!status.ok()) {
-    Status undo_status = rollback_to(savepoint);
+    Status undo_status = rollback_to(savepoint, statement_state_);
     if (!undo_status.ok()) {
       log_error("rollback after a failed statement failed: %s",
                 undo_status.message().c_str());
@@ -964,6 +1040,11 @@ Status Engine::execute_insert(const Statement& statement, ResultSet* result) {
     }
     RowValues values;
     values.strings.assign(value_columns.size(), std::string());
+    // A column that is not part of the insert keeps its default value, the
+    // vector column defaults to the zero vector of its dimension.
+    if (table->def.vector_index >= 0) {
+      values.vector.assign(table->def.columns[table->def.vector_index].dim, 0.0f);
+    }
     int64_t key = 0;
     bool key_set = false;
     for (size_t i = 0; i < row.size(); ++i) {
@@ -1094,9 +1175,27 @@ Status Engine::execute_update(const Statement& statement, ResultSet* result) {
     has_filter = true;
   }
 
-  uint64_t affected = 0;
+  // The rows that match the condition are collected first.  The update writes
+  // into the tree and must not change it while the scan over it is running:
+  // the rows of a page would move to another slot and the scan would visit
+  // some of them twice while skipping others.
+  std::vector<int64_t> keys;
   Status status = scan_rows(table, [&](int64_t key, const RowValues& row) {
     if (has_filter && !evaluate_condition(filter, table->def, row)) return true;
+    keys.push_back(key);
+    return true;
+  });
+  if (!status.ok()) return status;
+
+  uint64_t affected = 0;
+  Status update_error = Status::Ok();
+  RowValues row;
+  for (int64_t key : keys) {
+    Status read_status = read_row(table, key, &row);
+    if (!read_status.ok()) {
+      update_error = read_status;
+      break;
+    }
     RowValues updated = row;
     for (const ResolvedAssignment& assignment : assignments) {
       if (assignment.is_vector) {
@@ -1106,11 +1205,14 @@ Status Engine::execute_update(const Statement& statement, ResultSet* result) {
       }
     }
     Status update_status = update_row(table, key, updated);
-    if (!update_status.ok()) return false;
+    if (!update_status.ok()) {
+      // The error is reported after the scan, it must not be swallowed.
+      update_error = update_status;
+      break;
+    }
     ++affected;
-    return true;
-  });
-  if (!status.ok()) return status;
+  }
+  if (!update_error.ok()) return update_error;
   result->affected_rows = affected;
   return Status::Ok();
 }

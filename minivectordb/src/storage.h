@@ -278,7 +278,11 @@ class BTree {
   Status insert_into_parent(const std::vector<uint64_t>& path, uint64_t left_child,
                              uint64_t separator_key, uint64_t right_child);
   Status split_leaf(uint64_t leaf, uint64_t* right_leaf, uint64_t* separator);
-  Status split_internal(uint64_t page, uint64_t* right_page, uint64_t* separator);
+  Status split_internal(uint64_t page, uint64_t* right_page, uint64_t* separator,
+                        uint32_t split_at);
+  Status insert_pair_into_page(uint64_t page_id, uint32_t position,
+                                uint64_t left_child, uint64_t separator_key,
+                                uint64_t right_child);
   Status leaf_insert(uint64_t leaf, uint64_t key, const std::string& payload,
                      bool replace, bool allow_overflow);
   Status write_payload(uint64_t leaf, uint32_t slot_index, const std::string& payload);
@@ -287,6 +291,9 @@ class BTree {
 
   Storage* storage_;
   uint64_t root_page_ = 0;
+  // Number of scans that are currently running over the tree.  A scan may not
+  // see the rows of a page move to another slot.
+  int scan_depth_ = 0;
 };
 
 }  // namespace mvdb

@@ -95,6 +95,16 @@ is used, dirty pages are written back when they are evicted.  The size of the
 pool is derived from the cgroup memory limit of the container
 (`/sys/fs/cgroup/memory.max`), by default the pool uses at most 16 MiB.
 
+Two rules keep the pool consistent, both of them were violated before and
+cost rows that were silently lost:
+
+* a frame that is given back to the pool must not keep the id of the page it
+  held.  The frame is reused for another page later and the stale id would
+  remove the mapping of the *new* page, that page would then never be written
+  back to the data file,
+* a frame that is written back must be reachable in the page table, otherwise
+  the write back silently does nothing.
+
 ## 4. The clustered index
 
 Every table owns one B+tree whose keys are the primary key and whose leaves
@@ -111,6 +121,26 @@ free.
 * A delete marks the slot as deleted.  The space is reclaimed when the page
   is compacted, the page is never merged with a neighbour.  A deleted key can
   be inserted again, the tombstone slot is reused.
+* The slots of a leaf page are sorted by their key, the lookups use a binary
+  search over the slot array.
+
+The compaction rebuilds the payload area of a page: the payloads of the live
+rows are moved to the top of the page and the space of the deleted rows is
+reclaimed.  By default the slot array is rebuilt as well, the deleted slots
+are removed and the remaining slots move to the front of the array.  That is
+not allowed while a scan runs over the page: the scan would see the rows move
+to another slot, it would visit some of them twice and skip others.  During a
+scan the compaction therefore keeps the layout of the slot array and moves
+only the payloads.  For the same reason an `UPDATE` collects the rows that
+match its condition first and writes them afterwards, the tree is not changed
+while it is scanned.
+
+A leaf that is split only copies the rows that are still alive, a deleted row
+stays deleted.  The separator of the split is the first key of the new right
+leaf and it is inserted into the parent.  A parent that is full is split
+first, the new separator is then placed in the half of the parent that owns
+the child and the boundary of the two halves is propagated to the
+grandparent.
 
 ## 5. Transactions, durability and recovery
 
@@ -271,6 +301,25 @@ query phase runs completely from memory.
   `--mode recover` kills the server in the middle of a random write sequence,
   restarts it and checks that every committed row survived; the interrupted
   statement may be applied completely or not at all.
+
+The differential test found the following defects, all of them are covered by
+a fixed case or by the differential test itself now:
+
+| Defect | Effect |
+| --- | --- |
+| the comparison of the top-k heap was inverted | `ORDER BY distance DESC` returned the worst rows |
+| the slots of a leaf page were appended instead of inserted | the binary search of the primary key failed for out of order inserts |
+| the compaction moved the payloads in place and in the wrong order | the rows of a page were shifted, a row was read with the payload of another row |
+| the compaction dropped the chain id of an overflow row | a long row was lost as soon as its page was compacted |
+| a split copied the deleted rows into the new page | deleted rows came back to life |
+| the new sibling of a split was not referenced by the parent | the rows of the new leaf could not be found any more |
+| the compaction rebuilt the slot array while a scan was running | an `UPDATE` skipped rows and updated some of them twice |
+| a frame of the buffer pool kept the id of a page it did not hold | the rows that were written after a `ROLLBACK` were never written to the data file |
+| a row that could not be decoded ended the scan silently | the result of a query was truncated without an error |
+* `tests/bigtree.py` writes 30,000 rows with random keys, so that the leaf
+  pages are split again and again and the tree grows over three levels.  It
+  then deletes and updates rows and checks that every row that is still alive
+  is found again, with and without the in-memory mirror.
 * `tests/bench.py` measures the write and the query phase of the
   competition workload.
 * `tests/large_data.py` writes a data set that is bigger than the memory

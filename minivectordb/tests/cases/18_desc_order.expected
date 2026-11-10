@@ -1,0 +1,29 @@
+MiniVectorDB ready
+-- MVDB-END --
+-- MVDB-END --
+id	d
+4	3
+3	2.8284271247461903
+1	1
+2	1
+-- MVDB-END --
+id	d
+4	3
+3	2.8284271247461903
+-- MVDB-END --
+id	d
+1	1
+2	1
+-- MVDB-END --
+id	d
+4	3
+2	1
+-- MVDB-END --
+id	d
+3	2.8284271247461903
+1	1
+-- MVDB-END --
+id
+3
+1
+-- MVDB-END --

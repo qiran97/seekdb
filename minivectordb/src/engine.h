@@ -122,10 +122,20 @@ class Engine {
   Status create_vector_index(const Statement& statement);
   Status drop_vector_index(const Statement& statement);
 
+  // The state of the tables at the beginning of the running statement and at
+  // the beginning of the running transaction.
+  struct TableState {
+    uint64_t root_page = 0;
+    uint64_t row_count = 0;
+  };
+  std::map<std::string, TableState> statement_state_;
+  std::map<std::string, TableState> transaction_state_;
+
   // --- transactions ----------------------------------------------------
   Status begin_transaction(uint64_t txn_id);
   Status commit_transaction();
-  Status rollback_to(uint64_t savepoint);
+  Status rollback_to(uint64_t savepoint,
+                     const std::map<std::string, TableState>& state);
   Status begin_statement(uint64_t* savepoint);
 
   // --- statement dispatch ----------------------------------------------
@@ -143,6 +153,8 @@ class Engine {
   Status build_cache_if_possible(Table* table);
   using RowVisitor = std::function<bool(int64_t key, const RowValues& row)>;
   Status scan_rows(Table* table, const RowVisitor& visitor);
+  // Reads a single row of a table.
+  Status read_row(Table* table, int64_t key, RowValues* row);
   Status apply_undo(const UndoRecord& record);
   Status encode_row(const Table& table, const RowValues& row, std::string* out) const;
   Status decode_row(const Table& table, const std::string& payload, RowValues* out) const;
@@ -166,6 +178,7 @@ class Engine {
   bool catalog_dirty_ = false;
   bool search_mode_ann_ = false;
   bool shutdown_requested_ = false;
+  bool cache_disabled_ = false;
 };
 
 }  // namespace mvdb

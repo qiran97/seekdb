@@ -6,9 +6,17 @@ answer with a small reference model that implements the same semantics in
 python.  It is the fastest way to find disagreements between the storage
 engine and the intended behaviour of the SQL subset.
 
+Modes:
+  basic    random inserts, updates, deletes and selects, including column
+           lists, multi column updates, string comparisons, ordering by a
+           string column, LIMIT/OFFSET and the error paths
+  txn      random transaction sequences, the visible state is checked after
+           every statement
+  recover  a random write sequence that is interrupted with SIGKILL, the
+           server is restarted and the committed data has to be intact
+
 Usage:
-  python3 tests/fuzz.py --binary build/minivectordb [--iterations 300]
-                        [--seed 1] [--verbose]
+  python3 tests/fuzz.py [--binary PATH] [--iterations 300] [--seed 1]
 """
 
 import argparse
@@ -21,23 +29,40 @@ import sys
 import tempfile
 import time
 
-CATEGORIES = ["alpha", "beta", "gamma"]
+CATEGORIES = ["alpha", "beta", "gamma", ""]
 DIM = 4
 
 
-def vector_literal(rng):
-    return "[" + ",".join("%.4f" % rng.uniform(-1, 1) for _ in range(DIM)) + "]"
+def format_float(value):
+    """Formats a value the way the database prints a float32."""
+    import struct
+    single = struct.unpack("f", struct.pack("f", value))[0]
+    if single == 0.0:
+        return "0"
+    return "%.9g" % single
+
+
+def vector_literal(values):
+    return "[" + ", ".join(format_float(value) for value in values) + "]"
+
+
+def random_vector(rng):
+    return [round(rng.uniform(-1, 1), 4) for _ in range(DIM)]
 
 
 class Database:
-    """Reference model: a list of rows per table."""
+    """Reference model of the supported SQL subset.
+
+    A row is the tuple (key, category, vector); the vector of a row that was
+    inserted without a value is the zero vector, like in the database.
+    """
 
     def __init__(self):
         self.tables = {}
-        self.transactions = []
         self.committed = None
         self.in_transaction = False
 
+    # --- transactions ----------------------------------------------------
     def begin(self):
         if self.in_transaction:
             return ["ERROR 1568 a transaction is already active"]
@@ -60,43 +85,323 @@ class Database:
         self.committed = None
         return []
 
+    # --- schema ----------------------------------------------------------
     def create(self, name):
         if name in self.tables:
             return ["ERROR 1050 table '%s' already exists" % name]
         self.tables[name] = []
         return []
 
+    # --- data ------------------------------------------------------------
     def insert(self, name, key, category, vector):
-        if self.in_transaction and self.committed is not None:
-            pass
         rows = self.tables[name]
         for row in rows:
             if row[0] == key:
                 return ["ERROR 1062 duplicate primary key value"]
-        rows.append((key, category, vector))
+        rows.append((key, category, list(vector)))
         return []
 
-    def update(self, name, key, category):
+    def update(self, name, key, category=None, vector=None):
+        # A key of None updates every row of the table.
         rows = self.tables[name]
         for index, row in enumerate(rows):
-            if row[0] == key:
-                rows[index] = (row[0], category, row[2])
-                return []
+            if key is not None and row[0] != key:
+                continue
+            new_category = row[1] if category is None else category
+            new_vector = row[2] if vector is None else list(vector)
+            rows[index] = (row[0], new_category, new_vector)
         return []
 
     def delete(self, name, key):
+        # A key of None deletes every row of the table.
         rows = self.tables[name]
-        self.tables[name] = [row for row in rows if row[0] != key]
+        if key is None:
+            self.tables[name] = []
+        else:
+            self.tables[name] = [row for row in rows if row[0] != key]
         return []
 
-    def select(self, name, category_filter, limit):
+    # --- queries ---------------------------------------------------------
+    def filter_rows(self, name, terms):
         rows = self.tables[name]
-        if category_filter is not None:
-            rows = [row for row in rows if row[1] == category_filter]
+        for column, op, value in terms:
+            rows = [row for row in rows if self.compare(column, row, op, value)]
+        return rows
+
+    def compare(self, column, row, op, value):
+        if column == "id":
+            left = row[0]
+        elif column == "category":
+            left = row[1]
+        else:
+            left = row[2]
+        if op == "=":
+            return left == value
+        if op == "<>":
+            return left != value
+        if op == "<":
+            return left < value
+        if op == "<=":
+            return left <= value
+        if op == ">":
+            return left > value
+        if op == ">=":
+            return left >= value
+        raise AssertionError("unknown operator " + op)
+
+    def order_rows(self, rows, column, descending):
+        # The ties are always broken by the primary key in ascending order, the
+        # sort is therefore stable on the primary key first.
         rows = sorted(rows, key=lambda row: row[0])
+        if column == "id":
+            key = lambda row: row[0]
+        elif column == "category":
+            key = lambda row: row[1]
+        else:
+            raise AssertionError("unknown order column " + column)
+        return sorted(rows, key=key, reverse=descending)
+
+    def select(self, name, terms, order_column, descending, limit, offset,
+               columns):
+        rows = self.filter_rows(name, terms)
+        if order_column is not None:
+            rows = self.order_rows(rows, order_column, descending)
+        else:
+            # Without an order by the rows are returned in the scan order,
+            # which is the order of the primary key.
+            rows = sorted(rows, key=lambda row: row[0])
+        if offset:
+            rows = rows[offset:]
         if limit is not None:
             rows = rows[:limit]
         return rows
+
+    def distance_rows(self, name, terms, target, descending, limit):
+        rows = self.filter_rows(name, terms)
+        scored = []
+        for row in rows:
+            distance = math.sqrt(
+                sum((a - b) ** 2 for a, b in zip(row[2], target))
+            )
+            scored.append((distance, row))
+        # The ties are broken by the primary key in ascending order.
+        scored = sorted(scored, key=lambda item: item[1][0])
+        scored = sorted(scored, key=lambda item: item[0], reverse=descending)
+        if limit is not None:
+            scored = scored[:limit]
+        return scored
+def format_answer(rows, columns):
+    answer = []
+    for row in rows:
+        line = []
+        if columns == ["*"]:
+            columns = ["id", "category", "embedding"]
+        for column in columns:
+            if column == "id":
+                line.append(str(row[0]))
+            elif column == "category":
+                line.append(row[1])
+            else:
+                line.append(vector_literal(row[2]))
+        answer.append("\t".join(line))
+    return answer
+
+
+def generate(rng, iterations):
+    """Builds a random statement sequence and the expected answers."""
+    model = Database()
+    table = "t"
+    statements = []
+    expected = []
+    statements.append(
+        "CREATE TABLE %s (id BIGINT PRIMARY KEY, category VARCHAR(16), "
+        "embedding VECTOR(%d));" % (table, DIM)
+    )
+    expected.append(model.create(table))
+
+    next_key = 1
+    for _ in range(iterations):
+        choice = rng.random()
+
+        if choice < 0.30:
+            # Insert with and without an explicit column list.
+            key = next_key
+            next_key += 1
+            category = rng.choice(CATEGORIES)
+            vector = random_vector(rng)
+            literal = vector_literal(vector)
+            style = rng.random()
+            if style < 0.6:
+                statements.append(
+                    "INSERT INTO %s VALUES (%d, '%s', '%s');"
+                    % (table, key, category, literal)
+                )
+            elif style < 0.8:
+                statements.append(
+                    "INSERT INTO %s (id, category) VALUES (%d, '%s');"
+                    % (table, key, category)
+                )
+                vector = [0.0] * DIM
+            else:
+                statements.append(
+                    "INSERT INTO %s (category, id, embedding) VALUES "
+                    "('%s', %d, '%s');" % (table, category, key, literal)
+                )
+            expected.append(model.insert(table, key, category, vector))
+
+        elif choice < 0.42:
+            # Update of one or two columns, with or without a where clause.
+            key = rng.randint(1, max(next_key, 2))
+            category = rng.choice(CATEGORIES)
+            use_where = rng.random() < 0.8
+            if use_where:
+                statements.append(
+                    "UPDATE %s SET category = '%s' WHERE id = %d;"
+                    % (table, category, key)
+                )
+                expected.append(model.update(table, key, category=category))
+            else:
+                statements.append(
+                    "UPDATE %s SET category = '%s';" % (table, category)
+                )
+                expected.append(model.update(table, None, category=category))
+
+        elif choice < 0.50:
+            # Update of the vector column.
+            key = rng.randint(1, max(next_key, 2))
+            vector = random_vector(rng)
+            statements.append(
+                "UPDATE %s SET embedding = '%s' WHERE id = %d;"
+                % (table, vector_literal(vector), key)
+            )
+            expected.append(model.update(table, key, vector=vector))
+
+        elif choice < 0.58:
+            # Delete with and without a where clause.
+            if rng.random() < 0.85:
+                key = rng.randint(1, max(next_key, 2))
+                statements.append("DELETE FROM %s WHERE id = %d;" % (table, key))
+                expected.append(model.delete(table, key))
+            else:
+                statements.append("DELETE FROM %s;" % table)
+                expected.append(model.delete(table, None))
+
+        elif choice < 0.64:
+            # A duplicate key has to be rejected.
+            key = rng.randint(1, max(next_key, 2))
+            category = rng.choice(CATEGORIES)
+            vector = random_vector(rng)
+            statements.append(
+                "INSERT INTO %s VALUES (%d, '%s', '%s');"
+                % (table, key, category, vector_literal(vector))
+            )
+            expected.append(model.insert(table, key, category, vector))
+
+        elif choice < 0.70:
+            # An unknown column has to be rejected.
+            statements.append(
+                "SELECT id FROM %s WHERE no_such_column = 1;" % table
+            )
+            expected.append(["ERROR 1054 unknown column 'no_such_column'"])
+
+        elif choice < 0.76:
+            # A vector literal with the wrong dimension has to be rejected.
+            key = next_key
+            next_key += 1
+            statements.append(
+                "INSERT INTO %s VALUES (%d, 'x', '[1, 2, 3]');" % (table, key)
+            )
+            expected.append(["ERROR 1525 vector dimension mismatch: expected 4, got 3"])
+
+        elif choice < 0.88:
+            # A select with a filter, an order and a limit.
+            terms = []
+            if rng.random() < 0.6:
+                column = rng.choice(["id", "category"])
+                op = rng.choice(["=", "<>", "<", "<=", ">", ">="])
+                if column == "id":
+                    value = rng.randint(1, max(next_key, 2))
+                    terms.append((column, op, value))
+                    sql_term = "%s %s %d" % (column, op, value)
+                else:
+                    value = rng.choice(CATEGORIES)
+                    terms.append((column, op, value))
+                    sql_term = "%s %s '%s'" % (column, op, value)
+            else:
+                sql_term = None
+            order_column = rng.choice(["id", "category", None])
+            descending = rng.random() < 0.4
+            limit = rng.choice([None, 1, 3, 7])
+            offset = rng.choice([0, 0, 2]) if limit is not None else 0
+            columns = ["id", "category"] if rng.random() < 0.7 else ["*"]
+            sql = "SELECT %s FROM %s" % (", ".join(columns), table)
+            if sql_term is not None:
+                sql += " WHERE " + sql_term
+            if order_column is not None:
+                sql += " ORDER BY %s%s" % (order_column, " DESC" if descending else "")
+            if limit is not None:
+                sql += " LIMIT %d" % limit
+                if offset:
+                    sql += " OFFSET %d" % offset
+            statements.append(sql + ";")
+            rows = model.select(table, terms, order_column, descending, limit,
+                                offset, columns)
+            header = ["id", "category"] if columns != ["*"] else ["id", "category", "embedding"]
+            answer = ["\t".join(header)]
+            answer.extend(format_answer(rows, columns))
+            if order_column is None:
+                # Without an order by the result is a set.
+                expected.append(("unordered", answer))
+            else:
+                expected.append(answer)
+
+        else:
+            # A vector top-k query, with and without a filter.
+            target = [round(rng.uniform(-1, 1), 6) for _ in range(DIM)]
+            terms = []
+            sql_term = None
+            if rng.random() < 0.5:
+                value = rng.choice(CATEGORIES)
+                terms.append(("category", "=", value))
+                sql_term = "category = '%s'" % value
+            descending = rng.random() < 0.3
+            limit = rng.choice([1, 3, 10])
+            sql = ("SELECT id, L2_DISTANCE(embedding, '%s') AS distance FROM %s"
+                   % (vector_literal(target), table))
+            if sql_term is not None:
+                sql += " WHERE " + sql_term
+            sql += " ORDER BY distance%s" % (" DESC" if descending else "")
+            sql += " LIMIT %d;" % limit
+            statements.append(sql)
+            scored = model.distance_rows(table, terms, target, descending, limit)
+            answer = ["id\tdistance"]
+            for distance, row in scored:
+                answer.append("%d\t%.6f" % (row[0], distance))
+            expected.append(answer)
+
+    return model, statements, expected
+def run(binary, statements, workdir):
+    """Runs the statements and returns the answers of the database."""
+    process = subprocess.Popen(
+        [binary, "--data-dir", workdir],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    payload = "".join(statement + "\n" for statement in statements)
+    out, _ = process.communicate(payload.encode("utf-8"), timeout=120)
+    lines = out.decode("utf-8").splitlines()
+    answers = []
+    current = []
+    for line in lines:
+        if line.startswith("MiniVectorDB ready"):
+            continue
+        if line == "-- MVDB-END --":
+            answers.append(current)
+            current = []
+        else:
+            current.append(line)
+    return answers
 
 
 def run_transactions(binary, rng, iterations):
@@ -127,10 +432,10 @@ def run_transactions(binary, rng, iterations):
             key = next_key
             next_key += 1
             category = rng.choice(CATEGORIES)
-            vector = [round(rng.uniform(-1, 1), 4) for _ in range(DIM)]
-            literal = "[" + ",".join("%.4f" % value for value in vector) + "]"
+            vector = random_vector(rng)
             statements.append(
-                "INSERT INTO %s VALUES (%d, '%s', '%s');" % (table, key, category, literal)
+                "INSERT INTO %s VALUES (%d, '%s', '%s');"
+                % (table, key, category, vector_literal(vector))
             )
             expected.append(model.insert(table, key, category, vector))
         elif choice < 0.72:
@@ -139,20 +444,17 @@ def run_transactions(binary, rng, iterations):
             statements.append(
                 "UPDATE %s SET category = '%s' WHERE id = %d;" % (table, category, key)
             )
-            expected.append(model.update(table, key, category))
+            expected.append(model.update(table, key, category=category))
         elif choice < 0.80:
             key = rng.randint(1, max(next_key, 2))
             statements.append("DELETE FROM %s WHERE id = %d;" % (table, key))
             expected.append(model.delete(table, key))
         else:
-            pass
-        # The visible state is checked after every statement.
-        statements.append("SELECT id, category FROM %s ORDER BY id;" % table)
-        rows = model.select(table, None, None)
-        answer = ["id\tcategory"]
-        for row in rows:
-            answer.append("%d\t%s" % (row[0], row[1]))
-        expected.append(answer)
+            statements.append("SELECT id, category FROM %s ORDER BY id;" % table)
+            rows = model.select(table, [], "id", False, None, 0, ["id", "category"])
+            answer = ["id\tcategory"]
+            answer.extend(format_answer(rows, ["id", "category"]))
+            expected.append(answer)
 
     workdir = tempfile.mkdtemp(prefix="mvdb-txn-")
     try:
@@ -167,13 +469,12 @@ def run_recover(binary, rng, iterations):
 
     The crash model of the task allows the interrupted statement to be either
     completely applied or not applied at all, but every committed statement
-    has to survive.  The test therefore accepts the two states that bracket
-    the interrupted statement and rejects everything else.
+    has to survive.
     """
     model = Database()
     table = "t"
     statements = []
-    states = []  # the visible state after every statement
+    states = []
     statements.append(
         "CREATE TABLE %s (id BIGINT PRIMARY KEY, category VARCHAR(16), "
         "embedding VECTOR(%d));" % (table, DIM)
@@ -188,10 +489,10 @@ def run_recover(binary, rng, iterations):
             key = next_key
             next_key += 1
             category = rng.choice(CATEGORIES)
-            vector = [round(rng.uniform(-1, 1), 4) for _ in range(DIM)]
-            literal = "[" + ",".join("%.4f" % value for value in vector) + "]"
+            vector = random_vector(rng)
             statements.append(
-                "INSERT INTO %s VALUES (%d, '%s', '%s');" % (table, key, category, literal)
+                "INSERT INTO %s VALUES (%d, '%s', '%s');"
+                % (table, key, category, vector_literal(vector))
             )
             model.insert(table, key, category, vector)
         elif choice < 0.75:
@@ -204,7 +505,7 @@ def run_recover(binary, rng, iterations):
             statements.append(
                 "UPDATE %s SET category = '%s' WHERE id = %d;" % (table, category, key)
             )
-            model.update(table, key, category)
+            model.update(table, key, category=category)
         states.append(list(model.tables[table]))
 
     workdir = tempfile.mkdtemp(prefix="mvdb-recover-")
@@ -222,14 +523,12 @@ def run_recover(binary, rng, iterations):
             process.stdin.write((statement + "\n").encode("utf-8"))
             process.stdin.flush()
             if index == kill_index:
-                # The server is killed while it is working on the statement.
                 time.sleep(0.02)
                 process.kill()
                 break
-            process.stdout.readline()  # the terminator of the answer
+            process.stdout.readline()
         process.wait(timeout=30)
 
-        # The server is restarted with the same data directory.
         process = subprocess.Popen(
             [binary, "--data-dir", data_dir],
             stdin=subprocess.PIPE,
@@ -259,170 +558,28 @@ def run_recover(binary, rng, iterations):
     def normalise(rows):
         return ["%d\t%s" % (row[0], row[1]) for row in sorted(rows)]
 
-    actual = lines
-    # states[i] is the state after the statement i, the killed statement may
-    # or may not have been applied.
     accepted = []
     for candidate in (states[kill_index - 1], states[kill_index]):
         accepted.append(normalise(candidate))
-    if actual in accepted:
-        return True, "the state after the crash matches (%d rows)" % len(actual)
-    return False, "expected one of %r, got %r" % (accepted, actual)
+    if lines in accepted:
+        return True, "the state after the crash matches (%d rows)" % len(lines)
+    return False, "expected one of %r, got %r" % (accepted, lines)
 
 
-def run(binary, statements, workdir):
-    """Runs the statements and returns the answers of the database."""
-    process = subprocess.Popen(
-        [binary, "--data-dir", workdir],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
-    payload = "".join(statement + "\n" for statement in statements)
-    out, _ = process.communicate(payload.encode("utf-8"), timeout=120)
-    lines = out.decode("utf-8").splitlines()
-    # Split the answers: every block ends with the terminator.
-    answers = []
-    current = []
-    for line in lines:
-        if line.startswith("MiniVectorDB ready"):
-            continue
-        if line == "-- MVDB-END --":
-            answers.append(current)
-            current = []
-        else:
-            current.append(line)
-    return answers
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--binary", default="build/minivectordb")
-    parser.add_argument("--iterations", type=int, default=200)
-    parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--mode", default="basic", choices=["basic", "txn", "recover"])
-    args = parser.parse_args()
-
-    binary = os.path.abspath(args.binary)
-    if not os.path.exists(binary):
-        print("binary not found: %s" % binary)
-        return 2
-
-    rng = random.Random(args.seed)
-    model = Database()
-    statements = []
-    expected = []
-    table = "t"
-
-    statements.append(
-        "CREATE TABLE %s (id BIGINT PRIMARY KEY, category VARCHAR(16), "
-        "embedding VECTOR(%d));" % (table, DIM)
-    )
-    expected.append(model.create(table))
-
-    next_key = 1
-    for iteration in range(args.iterations):
-        choice = rng.random()
-        if choice < 0.40:
-            key = next_key
-            next_key += 1
-            category = rng.choice(CATEGORIES)
-            # The model and the database have to see the same values, the
-            # literal is rounded to four decimals like the generated text.
-            vector = [round(rng.uniform(-1, 1), 4) for _ in range(DIM)]
-            literal = "[" + ",".join("%.4f" % value for value in vector) + "]"
-            statements.append(
-                "INSERT INTO %s VALUES (%d, '%s', '%s');" % (table, key, category, literal)
-            )
-            expected.append(model.insert(table, key, category, vector))
-        elif choice < 0.50:
-            key = rng.randint(1, max(next_key, 2))
-            category = rng.choice(CATEGORIES)
-            statements.append(
-                "UPDATE %s SET category = '%s' WHERE id = %d;" % (table, category, key)
-            )
-            expected.append(model.update(table, key, category))
-        elif choice < 0.58:
-            key = rng.randint(1, max(next_key, 2))
-            statements.append("DELETE FROM %s WHERE id = %d;" % (table, key))
-            expected.append(model.delete(table, key))
-        elif choice < 0.85:
-            use_filter = rng.random() < 0.5
-            limit = rng.choice([None, 1, 3, 5])
-            category = rng.choice(CATEGORIES) if use_filter else None
-            if category is None:
-                sql = "SELECT id, category FROM %s" % table
-            else:
-                sql = "SELECT id, category FROM %s WHERE category = '%s'" % (table, category)
-            if limit is not None:
-                sql += " ORDER BY id LIMIT %d" % limit
-            else:
-                sql += " ORDER BY id"
-            statements.append(sql + ";")
-            rows = model.select(table, category, limit)
-            answer = ["id\tcategory"]
-            for row in rows:
-                answer.append("%d\t%s" % (row[0], row[1]))
-            expected.append(answer)
-        else:
-            # A vector query: the reference computes the euclidean distance.
-            target = [round(rng.uniform(-1, 1), 6) for _ in range(DIM)]
-            use_filter = rng.random() < 0.5
-            limit = rng.choice([1, 3])
-            category = rng.choice(CATEGORIES) if use_filter else None
-            literal = "[" + ",".join("%.6f" % value for value in target) + "]"
-            if category is None:
-                sql = "SELECT id, L2_DISTANCE(embedding, '%s') AS distance FROM %s" % (
-                    literal,
-                    table,
-                )
-            else:
-                sql = (
-                    "SELECT id, L2_DISTANCE(embedding, '%s') AS distance FROM %s "
-                    "WHERE category = '%s'" % (literal, table, category)
-                )
-            sql += " ORDER BY distance LIMIT %d;" % limit
-            statements.append(sql)
-            rows = model.select(table, category, None)
-            scored = []
-            for row in rows:
-                distance = math.sqrt(
-                    sum((a - b) ** 2 for a, b in zip(row[2], target))
-                )
-                scored.append((distance, row[0]))
-            scored.sort()
-            answer = ["id\tdistance"]
-            for distance, key in scored[:limit]:
-                answer.append("%d\t%s" % (key, "%.6f" % distance))
-            expected.append(answer)
-
-    if args.mode == "recover":
-        ok, detail = run_recover(binary, rng, args.iterations)
-        if ok:
-            print("PASS: the crash recovery keeps the committed data (%s)" % detail)
-        else:
-            print("FAIL: %s" % detail)
-        return 0 if ok else 1
-    if args.mode == "txn":
-        statements, expected, answers = run_transactions(binary, rng, args.iterations)
-    else:
-        workdir = tempfile.mkdtemp(prefix="mvdb-fuzz-")
-        try:
-            answers = run(binary, statements, workdir)
-        finally:
-            shutil.rmtree(workdir, ignore_errors=True)
-
-    failures = 0
+def compare(expected, answers):
+    """Compares the answers with the expected ones, returns the failures."""
+    failures = []
     if len(answers) != len(expected):
-        print("FAIL: %d answers, %d expected" % (len(answers), len(expected)))
-        failures += 1
+        failures.append((0, "%d answers, %d expected" % (len(answers), len(expected))))
+        return failures
     for index, (answer, want) in enumerate(zip(answers, expected)):
-        if isinstance(want, list) and want and isinstance(want[0], str) \
+        if isinstance(want, tuple) and want and want[0] == "unordered":
+            want = want[1]
+            ok = sorted(answer) == sorted(want)
+        elif isinstance(want, list) and want and isinstance(want[0], str) \
                 and want[0].startswith("ERROR"):
             ok = len(answer) == 1 and answer[0].startswith(want[0])
-        elif isinstance(want, list) and want and "\t" in want[0] \
-                and "distance" in want[0]:
+        elif isinstance(want, list) and want and want[0] == "id\tdistance":
             ok = len(answer) == len(want)
             if ok and answer:
                 ok = answer[0] == want[0]
@@ -441,20 +598,60 @@ def main():
         else:
             ok = answer == want
         if not ok:
-            failures += 1
+            failures.append((index, "expected: %r\n        actual:   %r" % (want, answer)))
+    return failures
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--binary", default="build/minivectordb")
+    parser.add_argument("--iterations", type=int, default=200)
+    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--mode", default="basic",
+                        choices=["basic", "txn", "recover"])
+    args = parser.parse_args()
+
+    binary = os.path.abspath(args.binary)
+    if not os.path.exists(binary):
+        print("binary not found: %s" % binary)
+        return 2
+
+    rng = random.Random(args.seed)
+
+    if args.mode == "recover":
+        ok, detail = run_recover(binary, rng, args.iterations)
+        if ok:
+            print("PASS: the crash recovery keeps the committed data (%s)" % detail)
+        else:
+            print("FAIL: %s" % detail)
+        return 0 if ok else 1
+
+    if args.mode == "txn":
+        statements, expected, answers = run_transactions(binary, rng, args.iterations)
+    else:
+        _, statements, expected = generate(rng, args.iterations)
+        workdir = tempfile.mkdtemp(prefix="mvdb-fuzz-")
+        try:
+            answers = run(binary, statements, workdir)
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+    failures = compare(expected, answers)
+    if failures:
+        for index, detail in failures[:5]:
             print("FAIL statement %d: %s" % (index, statements[index]))
-            if args.verbose:
-                print("--- statement log ---")
-                for number, statement in enumerate(statements[: index + 1]):
-                    print("%3d %s" % (number, statement))
-            print("  expected: %r" % (want,))
-            print("  actual:   %r" % (answer,))
-            if failures >= 5:
-                break
-    if failures == 0:
-        print("PASS: %d statements, the database agrees with the reference model"
-              % len(statements))
-    return 1 if failures else 0
+            print("        %s" % detail)
+        print("%d of %d statements disagree with the reference model"
+              % (len(failures), len(statements)))
+        if args.verbose:
+            print("--- statement log ---")
+            for number, statement in enumerate(statements):
+                print("%3d %s" % (number, statement))
+        return 1
+    print("PASS: %d statements, the database agrees with the reference model"
+          % len(statements))
+    return 0
 
 
 if __name__ == "__main__":
