@@ -112,6 +112,19 @@ class Database:
         rows.append((key, category, list(vector)))
         return []
 
+    def insert_rows(self, name, rows):
+        """Inserts several rows, a duplicate key leaves no row behind."""
+        if name not in self.tables:
+            return self.missing(name)
+        keys = set(row[0] for row in self.tables[name])
+        for key, category, vector in rows:
+            if key in keys:
+                return ["ERROR 1062 duplicate primary key value"]
+            keys.add(key)
+        for key, category, vector in rows:
+            self.tables[name].append((key, category, list(vector)))
+        return []
+
     def update(self, name, key, category=None, vector=None):
         # A key of None updates every row of the table.
         if name not in self.tables:
@@ -340,6 +353,21 @@ def generate(rng, iterations):
                 tables.remove(name)
                 next_keys.pop(name, None)
 
+        elif choice < 0.71:
+            # Several rows at once, one of them has a duplicate key: the
+            # statement must not leave a row behind.
+            rows = []
+            for _ in range(rng.randint(2, 3)):
+                key = rng.randint(1, max(next_key, 2))
+                category = rng.choice(CATEGORIES)
+                vector = random_vector(rng)
+                rows.append((key, category, vector))
+            values = ",\n".join(
+                "    (%d, '%s', '%s')" % (key, category, vector_literal(vector))
+                for key, category, vector in rows)
+            statements.append("INSERT INTO %s VALUES\n%s;" % (table, values))
+            expected.append(model.insert_rows(table, rows))
+
         elif choice < 0.74:
             # A duplicate key has to be rejected.
             key = rng.randint(1, max(next_key, 2))
@@ -460,17 +488,88 @@ def run(binary, statements, workdir):
     return answers
 
 
+def snapshot(model):
+    """The visible state of the database: the rows of every table."""
+    return {name: list(rows) for name, rows in model.tables.items()}
+
+
+def read_answer(process):
+    """Reads one answer block, it ends with the result terminator."""
+    lines = []
+    while True:
+        line = process.stdout.readline()
+        if not line:
+            raise RuntimeError("the server closed the connection")
+        text = line.decode("utf-8").rstrip("\n")
+        if text == "-- MVDB-END --":
+            return lines
+        if text.startswith("MiniVectorDB ready"):
+            continue
+        lines.append(text)
+
+
+def run_with_state(binary, statements, states):
+    """Runs the statements and compares the state of the database after
+    every statement with the state of the reference model."""
+    workdir = tempfile.mkdtemp(prefix="mvdb-txn-")
+    process = subprocess.Popen(
+        [binary, "--data-dir", workdir],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    answers = []
+    failures = []
+    try:
+        for index, statement in enumerate(statements):
+            process.stdin.write((statement + "\n").encode("utf-8"))
+            process.stdin.flush()
+            answers.append(read_answer(process))
+            want = {}
+            for name in sorted(states[index]):
+                rows = ["id\tcategory"]
+                for row in sorted(states[index][name]):
+                    rows.append("%d\t%s" % (row[0], row[1]))
+                want[name] = rows
+            got = {}
+            for name in sorted(want):
+                process.stdin.write(
+                    ("SELECT id, category FROM %s ORDER BY id;\n" % name).encode("utf-8")
+                )
+                process.stdin.flush()
+                got[name] = read_answer(process)
+            if got != want:
+                failures.append((index, "the state of the database differs\n"
+                                 "        expected: %r\n        actual:   %r"
+                                 % (want, got)))
+    finally:
+        try:
+            process.stdin.close()
+        except OSError:
+            pass
+        process.wait(timeout=30)
+        shutil.rmtree(workdir, ignore_errors=True)
+    return answers, failures
+
+
 def run_transactions(binary, rng, iterations):
-    """Drives random transactions and compares the visible state."""
+    """Drives random transactions and compares the visible state.
+
+    The state of the database is compared after every statement, a statement
+    that leaves a part of its changes behind is found right away and not only
+    when a later query happens to show the rows.
+    """
     model = Database()
     statements = []
     expected = []
+    states = []
     table = "t"
     statements.append(
         "CREATE TABLE %s (id BIGINT PRIMARY KEY, category VARCHAR(16), "
         "embedding VECTOR(%d));" % (table, DIM)
     )
     expected.append(model.create(table))
+    states.append(snapshot(model))
     next_key = 1
     next_table_id = 1
     for _ in range(iterations):
@@ -494,6 +593,19 @@ def run_transactions(binary, rng, iterations):
                 % (table, key, category, vector_literal(vector))
             )
             expected.append(model.insert(table, key, category, vector))
+        elif choice < 0.69:
+            # Several rows at once, one of them has a duplicate key.
+            rows = []
+            for _ in range(rng.randint(2, 3)):
+                key = rng.randint(1, max(next_key, 2))
+                category = rng.choice(CATEGORIES)
+                vector = random_vector(rng)
+                rows.append((key, category, vector))
+            values = ",\n".join(
+                "    (%d, '%s', '%s')" % (key, category, vector_literal(vector))
+                for key, category, vector in rows)
+            statements.append("INSERT INTO %s VALUES\n%s;" % (table, values))
+            expected.append(model.insert_rows(table, rows))
         elif choice < 0.72:
             key = rng.randint(1, max(next_key, 2))
             category = rng.choice(CATEGORIES)
@@ -523,13 +635,10 @@ def run_transactions(binary, rng, iterations):
                 name = rng.choice(sorted(model.tables))
                 statements.append("DROP TABLE %s;" % name)
                 expected.append(model.drop(name))
+        states.append(snapshot(model))
 
-    workdir = tempfile.mkdtemp(prefix="mvdb-txn-")
-    try:
-        answers = run(binary, statements, workdir)
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
-    return statements, expected, answers
+    answers, failures = run_with_state(binary, statements, states)
+    return statements, expected, answers, failures
 
 
 def run_recover(binary, rng, iterations):
@@ -695,8 +804,10 @@ def main():
             print("FAIL: %s" % detail)
         return 0 if ok else 1
 
+    state_failures = []
     if args.mode == "txn":
-        statements, expected, answers = run_transactions(binary, rng, args.iterations)
+        statements, expected, answers, state_failures = run_transactions(
+            binary, rng, args.iterations)
     else:
         _, statements, expected = generate(rng, args.iterations)
         workdir = tempfile.mkdtemp(prefix="mvdb-fuzz-")
@@ -706,6 +817,7 @@ def main():
             shutil.rmtree(workdir, ignore_errors=True)
 
     failures = compare(expected, answers)
+    failures.extend(state_failures)
     if failures:
         for index, detail in failures[:5]:
             print("FAIL statement %d: %s" % (index, statements[index]))

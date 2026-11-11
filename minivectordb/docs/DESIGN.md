@@ -295,7 +295,11 @@ query phase runs completely from memory.
   and restarted), which is how the crash recovery is covered.
 * `tests/fuzz.py` is a differential test: it generates a random sequence of
   statements, computes the expected answers with a small reference model in
-  python and compares them with the answers of the database.  It found the
+  python and compares them with the answers of the database.  In the
+  transaction mode the state of every table is compared after every
+  statement, a statement that leaves a part of its changes behind is found
+  right away.  The sequences write several rows at once, one of them with a
+  duplicate key, so that the atomicity of a statement is checked as well.  It found the
   inverted comparison of the top-k heap, a defect that the fixed cases could
   not see because their expected files were recorded from the database
   itself.  The mode `--mode txn` generates random transaction sequences and
