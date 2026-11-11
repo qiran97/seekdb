@@ -146,7 +146,9 @@ tested.
 
 `tests/fuzz.py` is a differential test: it generates random statement
 sequences and compares the answers of the database with a reference model
-that implements the same semantics in python.  `--mode txn` generates random
+that implements the same semantics in python.  The sequences run on several
+tables and they create and drop tables, the transaction mode does the same
+inside a transaction.  `--mode txn` generates random
 transaction sequences and checks the visible state after every statement,
 `--mode recover` kills the server in the middle of a random write sequence,
 restarts it and checks that the committed data survived.  The environment
