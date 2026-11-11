@@ -175,7 +175,10 @@ not force a single disk write.
 A statement that fails inside a transaction is rolled back to the savepoint
 that was taken when the statement started: the before images of the pages
 that the statement touched are written back and the undo log is truncated to
-the savepoint.  The in-memory mirror of the tables is dropped by a rollback
+the savepoint.  The state of the tables is part of the savepoint: a rollback
+restores the root page and the number of rows of every table, it removes the
+tables that the statement created and it restores the tables that it
+dropped.  The in-memory mirror of the tables is dropped by a rollback
 and rebuilt from the restored pages on the next query, because the mirror can
 be built in the middle of a transaction and would not know about the changes
 that happened before it existed.  A multi row `INSERT` whose second row violates the primary
@@ -318,9 +321,10 @@ a fixed case or by the differential test itself now:
 | a row that could not be decoded ended the scan silently | the result of a query was truncated without an error |
 * The fixed cases cover the order of a top-k query in both directions
   (`cases/18_desc_order.sql`), the rows that are written after a rolled back
-  transaction (`cases/19_rollback_data.sql`) and rows that are larger than a
+  transaction (`cases/19_rollback_data.sql`), rows that are larger than a
   page, they are stored in a chain of overflow pages
-  (`cases/20_large_rows.sql`).
+  (`cases/20_large_rows.sql`), and the tables that a transaction creates or
+  drops (`cases/21_transaction_ddl.sql`).
 * `tests/bigtree.py` writes 30,000 rows with random keys, so that the leaf
   pages are split again and again and the tree grows over three levels.  It
   then deletes and updates rows and checks that every row that is still alive

@@ -1,0 +1,31 @@
+MiniVectorDB ready
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+id	category
+5	beta
+-- MVDB-END --
+-- MVDB-END --
+ERROR 1146 table 'u' does not exist
+-- MVDB-END --
+id	category
+1	alpha
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+ERROR 1146 table 't' does not exist
+-- MVDB-END --
+-- MVDB-END --
+id	category
+1	alpha
+-- MVDB-END --
+-- MVDB-END --
+id	d
+1	0
+-- MVDB-END --
+-- MVDB-END --
+id	d
+1	0
+-- MVDB-END --

@@ -209,6 +209,15 @@ class Database:
         if limit is not None:
             scored = scored[:limit]
         return scored
+def format_result(rows, columns, header):
+    """Formats a result set, the answer of an error is returned unchanged."""
+    if isinstance(rows, list) and rows and isinstance(rows[0], str):
+        return list(rows)
+    answer = [header]
+    answer.extend(format_answer(rows, columns))
+    return answer
+
+
 def format_answer(rows, columns):
     answer = []
     for row in rows:
@@ -392,8 +401,7 @@ def generate(rng, iterations):
             rows = model.select(table, terms, order_column, descending, limit,
                                 offset, columns)
             header = ["id", "category"] if columns != ["*"] else ["id", "category", "embedding"]
-            answer = ["\t".join(header)]
-            answer.extend(format_answer(rows, columns))
+            answer = format_result(rows, columns, "\t".join(header))
             if order_column is None:
                 # Without an order by the result is a set.
                 expected.append(("unordered", answer))
@@ -419,10 +427,13 @@ def generate(rng, iterations):
             sql += " LIMIT %d;" % limit
             statements.append(sql)
             scored = model.distance_rows(table, terms, target, descending, limit)
-            answer = ["id\tdistance"]
-            for distance, row in scored:
-                answer.append("%d\t%.6f" % (row[0], distance))
-            expected.append(answer)
+            if isinstance(scored, list) and scored and isinstance(scored[0], str):
+                expected.append(list(scored))
+            else:
+                answer = ["id\tdistance"]
+                for distance, row in scored:
+                    answer.append("%d\t%.6f" % (row[0], distance))
+                expected.append(answer)
 
     return model, statements, expected
 def run(binary, statements, workdir):
@@ -461,7 +472,7 @@ def run_transactions(binary, rng, iterations):
     )
     expected.append(model.create(table))
     next_key = 1
-
+    next_table_id = 1
     for _ in range(iterations):
         choice = rng.random()
         if choice < 0.15:
@@ -494,12 +505,24 @@ def run_transactions(binary, rng, iterations):
             key = rng.randint(1, max(next_key, 2))
             statements.append("DELETE FROM %s WHERE id = %d;" % (table, key))
             expected.append(model.delete(table, key))
-        else:
+        elif choice < 0.88:
             statements.append("SELECT id, category FROM %s ORDER BY id;" % table)
             rows = model.select(table, [], "id", False, None, 0, ["id", "category"])
-            answer = ["id\tcategory"]
-            answer.extend(format_answer(rows, ["id", "category"]))
-            expected.append(answer)
+            expected.append(format_result(rows, ["id", "category"], "id\tcategory"))
+        else:
+            # A table is created or dropped inside the transaction.
+            if rng.random() < 0.5 or len(model.tables) < 2:
+                name = "u%d" % next_table_id
+                next_table_id += 1
+                statements.append(
+                    "CREATE TABLE %s (id BIGINT PRIMARY KEY, category "
+                    "VARCHAR(16), embedding VECTOR(%d));" % (name, DIM)
+                )
+                expected.append(model.create(name))
+            else:
+                name = rng.choice(sorted(model.tables))
+                statements.append("DROP TABLE %s;" % name)
+                expected.append(model.drop(name))
 
     workdir = tempfile.mkdtemp(prefix="mvdb-txn-")
     try:

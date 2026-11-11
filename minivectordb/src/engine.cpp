@@ -326,13 +326,7 @@ Status Engine::begin_transaction(uint64_t txn_id) {
   }
   // The state of the tables is remembered, a rollback of the transaction
   // restores it.
-  transaction_state_.clear();
-  for (const auto& entry : tables_) {
-    TableState state;
-    state.root_page = entry.second->root_page;
-    state.row_count = entry.second->row_count;
-    transaction_state_[entry.first] = state;
-  }
+  capture_table_state(&transaction_state_);
   in_transaction_ = true;
   current_txn_id_ = txn_id;
   storage_.begin_transaction(txn_id);
@@ -346,13 +340,7 @@ Status Engine::begin_statement(uint64_t* savepoint) {
   storage_.reset_logged_pages();
   // The state of the tables is remembered, a rollback of the statement
   // restores it.
-  statement_state_.clear();
-  for (const auto& entry : tables_) {
-    TableState state;
-    state.root_page = entry.second->root_page;
-    state.row_count = entry.second->row_count;
-    statement_state_[entry.first] = state;
-  }
+  capture_table_state(&statement_state_);
   return Status::Ok();
 }
 
@@ -432,15 +420,58 @@ Status Engine::rollback_to(uint64_t savepoint,
   // The root page of a tree and the number of its rows are part of the state
   // of the table.  A rollback restores them, the pages of the tree are
   // restored as well and the tree has to point at the root it pointed at
-  // before the statement.
+  // before the statement.  A table that was created or dropped by the
+  // statement is created or dropped again.
+  restore_table_state(state);
+  catalog_dirty_ = false;
+  return Status::Ok();
+}
+
+void Engine::capture_table_state(std::map<std::string, TableState>* state) {
+  state->clear();
+  for (const auto& entry : tables_) {
+    const Table& table = *entry.second;
+    TableState snapshot;
+    snapshot.id = table.id;
+    snapshot.def = table.def;
+    snapshot.root_page = table.root_page;
+    snapshot.row_count = table.row_count;
+    snapshot.has_vector_index = table.has_vector_index;
+    snapshot.index_name = table.index_name;
+    snapshot.index_column = table.index_column;
+    (*state)[entry.first] = std::move(snapshot);
+  }
+}
+
+void Engine::restore_table_state(const std::map<std::string, TableState>& state) {
+  // The tables that were created after the snapshot are removed.
+  for (auto it = tables_.begin(); it != tables_.end();) {
+    if (state.find(it->first) == state.end()) {
+      it = tables_.erase(it);
+    } else {
+      ++it;
+    }
+  }
   for (const auto& entry : state) {
     auto it = tables_.find(entry.first);
-    if (it == tables_.end()) continue;
+    if (it == tables_.end()) {
+      // The table was dropped, it is restored with its definition.
+      std::unique_ptr<Table> table(new Table());
+      table->id = entry.second.id;
+      table->def = entry.second.def;
+      table->root_page = entry.second.root_page;
+      table->row_count = entry.second.row_count;
+      table->has_vector_index = entry.second.has_vector_index;
+      table->index_name = entry.second.index_name;
+      table->index_column = entry.second.index_column;
+      table->tree = BTree(&storage_, table->root_page);
+      tables_[entry.first] = std::move(table);
+      continue;
+    }
     it->second->root_page = entry.second.root_page;
     it->second->tree.set_root_page(entry.second.root_page);
     it->second->row_count = entry.second.row_count;
   }
-  return Status::Ok();
 }
 
 Status Engine::rollback_open_transaction() {

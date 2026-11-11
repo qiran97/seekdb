@@ -123,13 +123,24 @@ class Engine {
   Status drop_vector_index(const Statement& statement);
 
   // The state of the tables at the beginning of the running statement and at
-  // the beginning of the running transaction.
+  // the beginning of the running transaction.  A transaction can create and
+  // drop tables, a rollback has to restore the tables of the snapshot.
   struct TableState {
+    uint32_t id = 0;
+    TableDef def;
     uint64_t root_page = 0;
     uint64_t row_count = 0;
+    bool has_vector_index = false;
+    std::string index_name;
+    int index_column = -1;
   };
   std::map<std::string, TableState> statement_state_;
   std::map<std::string, TableState> transaction_state_;
+  // Remembers the tables of the moment.
+  void capture_table_state(std::map<std::string, TableState>* state);
+  // Restores the tables of a snapshot: the tables that were created are
+  // removed, the tables that were dropped are restored.
+  void restore_table_state(const std::map<std::string, TableState>& state);
 
   // --- transactions ----------------------------------------------------
   Status begin_transaction(uint64_t txn_id);
