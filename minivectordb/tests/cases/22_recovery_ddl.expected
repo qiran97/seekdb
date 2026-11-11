@@ -1,0 +1,19 @@
+MiniVectorDB ready
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+__mvdb_sync__
+__mvdb_sync__
+-- MVDB-END --
+MiniVectorDB ready
+id	category
+7	beta
+-- MVDB-END --
+id	category
+1	alpha
+-- MVDB-END --
+Tables_in_minivectordb
+t
+u
+-- MVDB-END --
