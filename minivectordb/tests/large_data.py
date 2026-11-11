@@ -48,6 +48,21 @@ def io_counters(pid):
     return counters
 
 
+def read_answer(process):
+    """Reads one answer block, it ends with the result terminator."""
+    lines = []
+    while True:
+        line = process.stdout.readline()
+        if not line:
+            raise RuntimeError("the server closed the connection")
+        text = line.decode("utf-8").rstrip("\n")
+        if text == "-- MVDB-END --":
+            return lines
+        if text.startswith("MiniVectorDB ready"):
+            continue
+        lines.append(text)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", default="build/minivectordb")
@@ -82,7 +97,7 @@ def main():
              "embedding VECTOR(%d));\n" % DIM).encode("utf-8")
         )
         process.stdin.flush()
-        process.stdout.readline()
+        read_answer(process)
 
         write_start = time.monotonic()
         io_start = io_counters(process.pid)
@@ -100,7 +115,7 @@ def main():
                 ("INSERT INTO big VALUES\n" + ",\n".join(values) + ";\n").encode("utf-8")
             )
             process.stdin.flush()
-            process.stdout.readline()
+            read_answer(process)
             written += count
         write_time = time.monotonic() - write_start
         io_write = io_counters(process.pid)
@@ -113,10 +128,7 @@ def main():
                  "ORDER BY distance LIMIT 10;\n" % target).encode("utf-8")
             )
             process.stdin.flush()
-            process.stdout.readline()
-            for _ in range(10):
-                process.stdout.readline()
-            process.stdout.readline()
+            read_answer(process)
         query_time = time.monotonic() - query_start
         io_query = io_counters(process.pid)
         peak = peak_rss_kb(process.pid)

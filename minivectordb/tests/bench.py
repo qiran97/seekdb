@@ -59,6 +59,21 @@ def peak_rss_kb(pid):
     return 0
 
 
+def read_answer(process):
+    """Reads one answer block, it ends with the result terminator."""
+    lines = []
+    while True:
+        line = process.stdout.readline()
+        if not line:
+            raise RuntimeError("the server closed the connection")
+        text = line.decode("utf-8").rstrip("\n")
+        if text == "-- MVDB-END --":
+            return lines
+        if text.startswith("MiniVectorDB ready"):
+            continue
+        lines.append(text)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", default="build/minivectordb")
@@ -124,7 +139,7 @@ def main():
 
     try:
         send(schema)
-        process.stdout.readline()  # terminator of the CREATE TABLE answer
+        read_answer(process)  # the ready message and the answer of the CREATE
         io_start = io_counters(pid)
 
         write_start = time.monotonic()
@@ -133,8 +148,8 @@ def main():
             chunk = rows[begin:begin + args.batch]
             send("INSERT INTO bench VALUES\n" + ",\n".join(chunk) + ";\n")
             send("COMMIT;\n")
-            process.stdout.readline()  # terminator of the insert answer
-            process.stdout.readline()  # terminator of the commit answer
+            read_answer(process)  # the answer of the insert
+            read_answer(process)  # the answer of the commit
             batches += 1
             if batches % 10 == 0:
                 sys.stderr.write("  batch %d/%d\n" % (batches, (args.rows + args.batch - 1) // args.batch))
@@ -148,11 +163,7 @@ def main():
                 sys.stderr.write("  query %d/%d\n" % (index, len(queries)))
                 sys.stderr.flush()
             send(statement + "\n")
-            # The answer consists of a header line, K rows and a terminator.
-            process.stdout.readline()
-            for _ in range(TOPK):
-                process.stdout.readline()
-            process.stdout.readline()
+            read_answer(process)
         query_time = time.monotonic() - query_start
         io_query = io_counters(pid)
         peak = peak_rss_kb(pid)
