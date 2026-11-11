@@ -162,7 +162,12 @@ Status Engine::load_catalog() {
   if (page_id == 0) return Status::Ok();
   std::string payload;
   uint64_t next = page_id;
-  while (next != 0) {
+  // A chain that is longer than the number of pages of the database is
+  // broken, the walk stops after that many pages instead of running forever.
+  const uint64_t limit = storage_.page_count();
+  uint64_t visited = 0;
+  while (next != 0 && visited < limit) {
+    ++visited;
     uint8_t page[kPageSize];
     Status status = storage_.read_page(next, page);
     if (!status.ok()) return status;
@@ -261,8 +266,42 @@ Status Engine::store_catalog() {
   const uint32_t capacity = kPageSize - kCatalogHeaderSize;
   size_t page_count = (payload.size() + capacity - 1) / capacity;
   if (page_count == 0) page_count = 1;
+
+  // The pages of the old catalog are reused, the content of the catalog is
+  // written in place.  A page that is freed and allocated again in the same
+  // transaction would lose the content that a rollback has to restore: the
+  // image of the content was written to the log of an earlier transaction
+  // that is gone after its commit.
   std::vector<uint64_t> pages;
-  for (size_t i = 0; i < page_count; ++i) {
+  // A chain that is longer than the number of pages of the database is
+  // broken, the walk stops after that many pages instead of running forever.
+  const uint64_t limit = storage_.page_count();
+  uint64_t visited = 0;
+  uint64_t next = storage_.catalog_page();
+  while (next != 0 && pages.size() < page_count && visited < limit) {
+    ++visited;
+    uint8_t* page = nullptr;
+    Status status = storage_.fetch_page(next, &page);
+    if (!status.ok()) return status;
+    uint64_t following = load_u32(page + kCatalogNextPageOffset);
+    storage_.unpin_page(next);
+    pages.push_back(next);
+    next = following;
+  }
+  // The pages of the chain that are not needed any more become free.
+  while (next != 0 && visited < limit) {
+    ++visited;
+    uint8_t* page = nullptr;
+    Status status = storage_.fetch_page(next, &page);
+    if (!status.ok()) break;
+    uint64_t following = load_u32(page + kCatalogNextPageOffset);
+    storage_.unpin_page(next);
+    status = storage_.free_page(next);
+    if (!status.ok()) return status;
+    next = following;
+  }
+  // The catalog needs more pages.
+  while (pages.size() < page_count) {
     uint64_t page_id = 0;
     Status status = storage_.allocate_page(PageType::kCatalog, &page_id);
     if (!status.ok()) return status;
@@ -291,21 +330,9 @@ Status Engine::store_catalog() {
     storage_.mark_dirty(pages[i]);
     storage_.unpin_page(pages[i]);
   }
-  uint64_t old_catalog = storage_.catalog_page();
   storage_.set_catalog_page(pages[0]);
   Status status = storage_.store_db_header();
   if (!status.ok()) return status;
-  // The previous catalog pages become free.
-  uint64_t next = old_catalog;
-  while (next != 0) {
-    uint8_t page[kPageSize];
-    status = storage_.read_page(next, page);
-    if (!status.ok()) break;
-    uint64_t following = load_u32(page + kCatalogNextPageOffset);
-    status = storage_.free_page(next);
-    if (!status.ok()) break;
-    next = following;
-  }
   return Status::Ok();
 }
 

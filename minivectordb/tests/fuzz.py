@@ -641,12 +641,22 @@ def run_transactions(binary, rng, iterations):
     return statements, expected, answers, failures
 
 
+def committed_state(model):
+    """The state that is durable: the rows of the last commit."""
+    if model.in_transaction:
+        return {name: list(rows) for name, rows in model.committed.items()}
+    return snapshot(model)
+
+
 def run_recover(binary, rng, iterations):
     """Kills the server in the middle of a write sequence and checks the state.
 
     The crash model of the task allows the interrupted statement to be either
     completely applied or not applied at all, but every committed statement
-    has to survive.
+    has to survive and a transaction that was not committed has to be gone.
+    The sequence works on several tables, it creates and drops tables and it
+    writes inside a transaction, the crash therefore interrupts a transaction
+    that has to be rolled back by the recovery.
     """
     model = Database()
     table = "t"
@@ -657,39 +667,84 @@ def run_recover(binary, rng, iterations):
         "embedding VECTOR(%d));" % (table, DIM)
     )
     model.create(table)
-    states.append(list(model.tables[table]))
+    states.append(committed_state(model))
+    tables = [table]
+    next_keys = {table: 1}
+    next_table_id = 1
+    in_transaction = False
 
-    next_key = 1
-    for _ in range(iterations):
+    for index in range(iterations):
         choice = rng.random()
-        if choice < 0.55:
+        table = rng.choice(tables)
+        next_key = next_keys[table]
+        if index % 6 == 0 and not in_transaction:
+            # The writes are grouped into a transaction, the crash interrupts a
+            # transaction that has to be rolled back.
+            statements.append("BEGIN;")
+            model.begin()
+            in_transaction = True
+        elif index % 6 == 5 and in_transaction:
+            statements.append("COMMIT;")
+            model.commit()
+            in_transaction = False
+        elif choice < 0.52:
             key = next_key
             next_key += 1
+            next_keys[table] = next_key
             category = rng.choice(CATEGORIES)
             vector = random_vector(rng)
             statements.append(
-                "INSERT INTO %s VALUES (%d, '%s', '%s');"
-                % (table, key, category, vector_literal(vector))
+                "INSERT INTO %s VALUES (%d, '%s', '%s');" % (table, key, category, vector_literal(vector))
             )
             model.insert(table, key, category, vector)
-        elif choice < 0.75:
+        elif choice < 0.68:
             key = rng.randint(1, max(next_key, 2))
             statements.append("DELETE FROM %s WHERE id = %d;" % (table, key))
             model.delete(table, key)
-        else:
+        elif choice < 0.94:
             key = rng.randint(1, max(next_key, 2))
             category = rng.choice(CATEGORIES)
             statements.append(
                 "UPDATE %s SET category = '%s' WHERE id = %d;" % (table, category, key)
             )
             model.update(table, key, category=category)
-        states.append(list(model.tables[table]))
+        else:
+            # A table is created or dropped.
+            if rng.random() < 0.5 or len(tables) < 2:
+                name = "u%d" % next_table_id
+                next_table_id += 1
+                statements.append(
+                    "CREATE TABLE %s (id BIGINT PRIMARY KEY, category "
+                    "VARCHAR(16), embedding VECTOR(%d));" % (name, DIM)
+                )
+                model.create(name)
+                tables.append(name)
+                next_keys[name] = 1
+            else:
+                name = rng.choice(sorted(tables))
+                statements.append("DROP TABLE %s;" % name)
+                model.drop(name)
+                tables.remove(name)
+                next_keys.pop(name, None)
+        states.append(committed_state(model))
+    if in_transaction:
+        statements.append("COMMIT;")
+        model.commit()
+        states.append(committed_state(model))
 
     workdir = tempfile.mkdtemp(prefix="mvdb-recover-")
     data_dir = os.path.join(workdir, "data")
     os.makedirs(data_dir)
     try:
-        kill_index = rng.randrange(1, len(statements))
+        # The kill has to interrupt a commit most of the time: the pages of
+        # the transaction are written before the commit record, a kill in
+        # between leaves a transaction that the recovery has to roll back.
+        commits = [index for index, statement in enumerate(statements)
+                   if statement == "COMMIT;"]
+        if commits and rng.random() < 0.7:
+            kill_index = rng.choice(commits)
+        else:
+            kill_index = rng.randrange(1, len(statements))
         process = subprocess.Popen(
             [binary, "--data-dir", data_dir],
             stdin=subprocess.PIPE,
@@ -700,10 +755,18 @@ def run_recover(binary, rng, iterations):
             process.stdin.write((statement + "\n").encode("utf-8"))
             process.stdin.flush()
             if index == kill_index:
-                time.sleep(0.02)
+                # The kill has to land inside the statement: the server writes
+                # the pages of a commit and writes the commit record after
+                # that, a kill in between leaves a transaction that is
+                # completely applied or not applied at all.
+                time.sleep(rng.uniform(0.0, 0.006))
                 process.kill()
                 break
-            process.stdout.readline()
+            # The answer of the statement has to be read completely, otherwise
+            # the answers of the statements shift and the kill lands on the
+            # wrong statement.  The first line of the server is the ready
+            # message, it belongs to no statement.
+            read_answer(process)
         process.wait(timeout=30)
 
         process = subprocess.Popen(
@@ -712,35 +775,54 @@ def run_recover(binary, rng, iterations):
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
-        process.stdin.write(
-            ("SELECT id, category FROM %s ORDER BY id;\n" % table).encode("utf-8")
-        )
+
+        def read_block():
+            lines = []
+            while True:
+                line = process.stdout.readline()
+                if not line:
+                    return None
+                text = line.decode("utf-8").rstrip("\n")
+                if text == "-- MVDB-END --":
+                    return lines
+                if text.startswith("MiniVectorDB ready"):
+                    continue
+                lines.append(text)
+
+        # The tables that survived the crash and their rows.
+        process.stdin.write(b"SHOW TABLES;\n")
         process.stdin.flush()
-        lines = []
-        while True:
-            line = process.stdout.readline()
-            if not line:
-                break
-            text = line.decode("utf-8").rstrip("\n")
-            if text == "-- MVDB-END --":
-                break
-            if text == "MiniVectorDB ready" or text == "id\tcategory":
-                continue
-            lines.append(text)
+        answer = read_block() or []
+        names = [line for line in answer if not line.startswith("Tables_in")]
+        state = {}
+        for name in names:
+            process.stdin.write(
+                ("SELECT id, category FROM %s ORDER BY id;\n" % name).encode("utf-8")
+            )
+            process.stdin.flush()
+            rows = read_block() or []
+            state[name] = [row for row in rows if not row.startswith("id\tcategory")]
         process.stdin.close()
         process.wait(timeout=30)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
-    def normalise(rows):
-        return ["%d\t%s" % (row[0], row[1]) for row in sorted(rows)]
+    def normalise(state):
+        result = {}
+        for name, rows in state.items():
+            result[name] = ["%d\t%s" % (row[0], row[1]) for row in sorted(rows)]
+        return result
 
     accepted = []
     for candidate in (states[kill_index - 1], states[kill_index]):
         accepted.append(normalise(candidate))
-    if lines in accepted:
-        return True, "the state after the crash matches (%d rows)" % len(lines)
-    return False, "expected one of %r, got %r" % (accepted, lines)
+    got = normalise({name: [(int(row.split("\t")[0]), row.split("\t")[1])
+                           for row in rows]
+                     for name, rows in state.items()})
+    if got in accepted:
+        return True, "the state after the crash matches (%d rows)" % sum(
+            len(rows) for rows in got.values())
+    return False, "expected one of %r, got %r" % (accepted, got)
 
 
 def compare(expected, answers):

@@ -69,6 +69,15 @@ page of every table, the row count and the vector index information.  It is
 rewritten whenever a table is created, dropped or when the root page of a
 table moves.
 
+The chain is rewritten in place.  The pages of the old catalog are reused,
+the surplus pages at the end of the chain are given back to the free page
+list and new pages are only allocated when the catalog outgrows the old
+chain.  The chain is read through the buffer pool: a page that is still
+dirty is not read from the data file, where its content can be the one of an
+older transaction.  The image of a page is taken before its content is
+overwritten, a rollback restores the catalog of the state before the
+transaction.
+
 ## 3. Pages and the buffer pool
 
 ```
@@ -307,7 +316,19 @@ query phase runs completely from memory.
   restored the pages but not the in-memory mirror of a table.  The mode
   `--mode recover` kills the server in the middle of a random write sequence,
   restarts it and checks that every committed row survived; the interrupted
-  statement may be applied completely or not at all.
+  statement may be applied completely or not at all.  The answer of a
+  statement is read up to the result terminator, otherwise the answers of
+  the statements shift by one and the kill lands on the wrong statement: the
+  recovery then rolls a committed transaction back, which is correct, but
+  the test reports it as a defect.
+* `tests/fuzz_ddl.py` is a differential test for the data definition
+  statements.  It creates and drops tables, inside transactions and outside
+  of them, and compares the set of tables with a reference model after every
+  statement.  Every few statements the server is restarted: the tables and
+  their rows have to survive the restart, a transaction that was open when
+  the server was stopped has to be rolled back by the recovery.  The test
+  covers the catalog, which is spread over several pages as soon as there
+  are many tables.
 
 The differential test found the following defects, all of them are covered by
 a fixed case or by the differential test itself now:
@@ -347,6 +368,7 @@ a fixed case or by the differential test itself now:
 * The differential test is run with 60 seeds in the basic mode and with 30
   seeds in the transaction and in the recovery mode, each with the in memory
   mirror switched on and off, and with the page invariant check enabled.
+  The data definition test is run with 25 seeds.
 
 ## 10. Implemented features and known limitations
 

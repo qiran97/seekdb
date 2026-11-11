@@ -129,6 +129,7 @@ python3 tests/run_tests.py --binary build/minivectordb
 python3 tests/fuzz.py --binary build/minivectordb --iterations 400 --seed 1
 python3 tests/fuzz.py --binary build/minivectordb --mode txn --iterations 300 --seed 1
 python3 tests/fuzz.py --binary build/minivectordb --mode recover --iterations 80 --seed 1
+python3 tests/fuzz_ddl.py --binary build/minivectordb --iterations 200 --seed 1
 python3 tests/bigtree.py --binary build/minivectordb --rows 30000
 make bench                 # runs the performance benchmark
 python3 tests/large_data.py --binary build/minivectordb --rows 100000
@@ -156,6 +157,12 @@ variable `MINIVECTORDB_DISABLE_CACHE=1` switches the in memory mirror off,
 so that the same sequence runs through the pages of the buffer pool, and
 `MINIVECTORDB_CHECK_PAGES=1` checks the invariants of every page that the
 engine writes.
+
+`tests/fuzz_ddl.py` is a differential test for the data definition
+statements: it creates and drops tables, inside transactions and outside of
+them, compares the set of tables with a reference model after every
+statement and restarts the server every few statements to check that the
+tables and their rows survive the restart.
 
 `tests/bigtree.py` writes 30,000 rows with random keys, so that the leaf
 pages are split again and again and the tree grows over three levels.  It
