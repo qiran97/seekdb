@@ -65,6 +65,19 @@ database does not need a TTY and no port has to be published.
 The environment variables `MINIVECTORDB_DATA_DIR` and
 `MINIVECTORDB_SEARCH_MODE` provide the same settings.
 
+## Build and run
+
+```bash
+docker build -t minivectordb:latest .          # from the root of the repository
+docker run --rm -i -v minivectordb-data:/data minivectordb:latest
+```
+
+The image builds the database from the sources of `minivectordb/`, the
+compiler is only needed while the image is built.  The program is linked
+statically, the runtime image needs no library.  The data of the database is
+written to `/data`, the program speaks the JSON lines protocol on the
+standard input and the standard output, the logs go to the standard error.
+
 ## Protocol
 
 The driver of the judge speaks the JSON lines protocol: one JSON object per
@@ -127,6 +140,19 @@ Comparison operators `=`, `<`, `<=`, `>`, `>=` and `<>` are supported in
 `WHERE` clauses and combined with `AND`, `OR` and `NOT`.  String comparisons
 use the unicode code point order, `VARCHAR` lengths are counted in unicode
 characters.
+
+## Build and run
+
+```bash
+docker build -t minivectordb:latest .          # from the root of the repository
+docker run --rm -i -v minivectordb-data:/data minivectordb:latest
+```
+
+The image builds the database from the sources of `minivectordb/`, the
+compiler is only needed while the image is built.  The program is linked
+statically, the runtime image needs no library.  The data of the database is
+written to `/data`, the program speaks the JSON lines protocol on the
+standard input and the standard output, the logs go to the standard error.
 
 ## Protocol
 
