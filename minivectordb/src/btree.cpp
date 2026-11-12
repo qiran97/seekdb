@@ -635,7 +635,8 @@ Status BTree::leaf_insert(uint64_t leaf, uint64_t key, const std::string& payloa
   return Status::Ok();
 }
 
-Status BTree::split_leaf(uint64_t leaf, uint64_t* right_leaf, uint64_t* separator) {
+Status BTree::split_leaf(uint64_t leaf, uint64_t* right_leaf, uint64_t* separator,
+                         uint64_t new_key) {
   uint8_t* page = nullptr;
   Status status = storage_->fetch_page(leaf, &page);
   if (!status.ok()) return status;
@@ -648,9 +649,74 @@ Status BTree::split_leaf(uint64_t leaf, uint64_t* right_leaf, uint64_t* separato
     if (leaf_slot_flags(page, i) & kSlotDeleted) continue;
     live.push_back(i);
   }
-  if (live.size() < 2) {
+  if (live.empty()) {
     storage_->unpin_page(leaf);
-    return Status::Error(ErrorCode::kInternalError, "cannot split a single slot leaf");
+    return Status::Error(ErrorCode::kInternalError, "cannot split an empty leaf");
+  }
+  if (live.size() == 1) {
+    // A leaf with a single row cannot be split in half.  The row moves to the
+    // new page when the new row is the smaller one, otherwise the new page
+    // stays empty and takes the new row.  Both pages hold one row then, a
+    // row that is bigger than a page is stored in an overflow chain.
+    uint32_t slot = live[0];
+    uint64_t key = leaf_slot_key(page, slot);
+    uint32_t flags = leaf_slot_flags(page, slot);
+    uint32_t length = leaf_slot_length(page, slot);
+    uint32_t offset = leaf_slot_offset(page, slot);
+
+    status = storage_->note_modification(leaf, page);
+    if (!status.ok()) {
+      storage_->unpin_page(leaf);
+      return status;
+    }
+    uint64_t right = 0;
+    status = storage_->allocate_page(PageType::kLeaf, &right);
+    if (!status.ok()) {
+      storage_->unpin_page(leaf);
+      return status;
+    }
+    uint8_t* right_page = nullptr;
+    status = storage_->fetch_page(right, &right_page);
+    if (!status.ok()) {
+      storage_->unpin_page(leaf);
+      return status;
+    }
+    memset(right_page, 0, kPageSize);
+    store_u32(right_page + 0, PageType::kLeaf);
+    store_u32(right_page + 4, static_cast<uint32_t>(right));
+    leaf_set_heap_top(right_page, kPageSize);
+
+    if (new_key > key) {
+      // The new row is the larger one, it goes to the empty page and the
+      // leaf keeps its row.
+      *separator = new_key;
+      *right_leaf = right;
+      storage_->mark_dirty(right);
+      storage_->unpin_page(right);
+      storage_->mark_dirty(leaf);
+      storage_->unpin_page(leaf);
+      return Status::Ok();
+    }
+    // The new row is the smaller one, it goes to the leaf and the row of
+    // the leaf moves to the new page.  The payload is copied before the leaf
+    // is emptied.
+    if (flags & kSlotOverflow) {
+      // The chain of an overflow row is moved to the new page together with
+      // the slot.
+      leaf_set_slot(right_page, 0, key, offset, length, flags);
+      leaf_set_slot_count(right_page, 1);
+    } else {
+      leaf_append_slot(right_page, key, page + offset, length);
+    }
+    leaf_set_slot_count(page, 0);
+    leaf_compact(page, false);
+    storage_->mark_dirty(right);
+    storage_->unpin_page(right);
+    storage_->mark_dirty(leaf);
+    storage_->unpin_page(leaf);
+    *separator = key;
+    *right_leaf = right;
+    return Status::Ok();
   }
   size_t total = 0;
   for (uint32_t index : live) {
@@ -959,7 +1025,7 @@ Status BTree::insert(uint64_t key, const std::string& payload) {
 
   uint64_t right = 0;
   uint64_t separator = 0;
-  status = split_leaf(leaf, &right, &separator);
+  status = split_leaf(leaf, &right, &separator, key);
   if (!status.ok()) return status;
   status = insert_into_parent(path, leaf, separator, right);
   if (!status.ok()) return status;

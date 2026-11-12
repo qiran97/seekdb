@@ -277,7 +277,10 @@ class BTree {
   Status descend_leftmost(std::vector<uint64_t>* path, uint64_t* leaf);
   Status insert_into_parent(const std::vector<uint64_t>& path, uint64_t left_child,
                              uint64_t separator_key, uint64_t right_child);
-  Status split_leaf(uint64_t leaf, uint64_t* right_leaf, uint64_t* separator);
+  // Splits a leaf that is full.  The key of the row that does not fit into
+  // the leaf is needed when the leaf holds a single row.
+  Status split_leaf(uint64_t leaf, uint64_t* right_leaf, uint64_t* separator,
+                    uint64_t new_key);
   Status split_internal(uint64_t page, uint64_t* right_page, uint64_t* separator,
                         uint32_t split_at);
   Status insert_pair_into_page(uint64_t page_id, uint32_t position,

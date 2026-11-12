@@ -1,0 +1,16 @@
+MiniVectorDB ready
+-- MVDB-END --
+-- MVDB-END --
+id
+2
+5
+9
+-- MVDB-END --
+id	distance
+5	12.703813259722084
+-- MVDB-END --
+-- MVDB-END --
+id
+5
+9
+-- MVDB-END --
