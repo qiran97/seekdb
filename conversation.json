@@ -204,6 +204,13 @@
    "phase": "验证纠错",
    "content": "按题包的协议重写通信层：src/json.cpp 自己实现了一个小的 JSON 读写器（不能依赖联网安装的库），服务端的默认协议改成 jsonl，握手、execute、shutdown 三种请求与三种应答按 STDIO_PROTOCOL.md 实现，纯文本协议保留给本地测试脚本（--protocol text）。把题包的 protocol_check 与 mysqltest 公开用例拷进仓库，tests/protocol_check.py 负责跑它们，第一次跑就暴露出两个真实的 SQL 缺口：非主键的 BIGINT 列写不进去（列的值只会按字符串列和向量列处理），负整数常量解析不了（词法器把 '-' 当成标点）。补上这两处之后，题包自带的检查器 20 条公开用例全部 PASS。同一轮还把向量字面量的解析改成零拷贝（原来每个元素要两次堆分配加三次拷贝），并把 TopK 排序键改成距离的平方（输出位级不变，省掉每行的开方）。",
    "evidence_ref": "E30"
+  },
+  {
+   "id": "C26",
+   "source": "agent",
+   "phase": "验证纠错",
+   "content": "第二次提测的反馈说明镜像已经能构建并运行（任务状态从『执行失败』变成『执行成功』），但准入仍未通过：29 个正式用例里有 3 个没过，1 个是 database exited before response，2 个是功能结果不符合要求。公开用例在本地全过，正式用例多出 9 个隐藏用例，隐藏的是数据与操作序列而不是功能要求。于是按题包 README 列出的正式要求逐条自查：非法向量、失败语句的原子性、强杀后的提交保留与恢复途中再次退出、超过内存限额的数据、ANN 的过滤与召回。自查中发现一个真实的语义违反：请求里的 SQL 只解析了第一条语句，剩下的部分被静默丢弃——『SELECT id FROM t UNION SELECT id FROM t』会当成普通的 SELECT 执行并成功返回，而题目明确要求『不支持的语句须返回约定错误，不能静默执行为其他含义』。现在解析器会报告语句用掉了多少字符，剩下的部分如果不是空白、分号和注释就返回错误。另外加了两层防护：请求处理包在异常保护里（一条语句抛异常时回一个错误应答，进程不再退出），撤销日志的长度字段超过一页就当作损坏的日志停止读取（避免为损坏的长度预留几 GB 内存）。",
+   "evidence_ref": "E31"
   }
  ],
  "experiments": [
@@ -446,6 +453,14 @@
    "command": "python3 tests/protocol_check/run.py --command '[...build/minivectordb, --data-dir, {data_dir}]' --output <dir>；make test（23 个本地用例 + 四种差分模式 + 大树 + 协议检查）",
    "output": "协议改写前：sql_comparisons/sql_ordering 报 unsupported value for column 'value'（非主键 BIGINT 列写不进），sql_bigint 报 unexpected token in expression: '-'（负整数常量解析不了），其余 17 条通过；协议改写并补上这两处之后：20 条公开用例全部 PASS，其中 transaction_autocommit_atomic（多行 INSERT 第二行维度不符，整条语句必须不生效）、transaction_failed_insert（事务内多行 INSERT 第二行主键重复，语句失败但事务可继续提交）、transaction_shutdown_rollback（关闭时回滚未提交事务）都通过；本地套件 23 个用例、差分四种模式（basic/txn/recover/ddl）、大树 30000 行全部通过",
    "conclusion": "把官方检查器变成仓库里的一条测试，是这次能一次定位三个问题（协议、两种 SQL 缺口）的原因；自己写的差分测试覆盖不到协议层，也覆盖不到公开用例才会用到的那几个语法分支"
+  },
+  {
+   "id": "E31",
+   "source": "tool",
+   "purpose": "按题包 README 的正式要求逐条自查，找出隐藏用例可能踩到的语义问题",
+   "command": "python3 tests/protocol_check/run.py --command '[...build/minivectordb, --data-dir, {data_dir}]'；自写脚本用 JSONL 协议跑边界语句（多语句、UNION、IN、LIKE、COUNT、NULL、VARCHAR 长度、20000 维向量、20 万字符的行、200 张表）并在 AddressSanitizer 下运行；自写脚本模拟判题器的强杀恢复流程（提交后强杀、重启核对、强杀在恢复途中再重启）",
+   "output": "公开用例 20/20 通过（修复前 17/20，失败的三条是协议不匹配、BIGINT 列与负整数常量）；强杀恢复模拟 8 个种子各 40 轮全部通过：提交成功的行在强杀后保留，未提交的事务不生效，恢复途中再次退出后仍能恢复；边界语句自查发现 SELECT ... UNION SELECT ... 与 BEGIN; BEGIN; 会静默只执行第一条语句并返回成功，违反『不能静默执行为其他含义』，已改为返回错误；ASan 下跑 2 万维向量、20 万字符的行、200 张表、单条 2000 行的插入、4000 行的事务都没有崩溃",
+   "conclusion": "公开用例全过不等于准入通过：正式用例多 9 个隐藏用例，隐藏的是数据不是功能。把题包 README 里列出的正式要求当成验收清单逐条自查，比继续猜协议更有效；剩下的失败用例没有可观测的细节，只能靠把每条正式要求都自查一遍来缩小范围"
   }
  ],
  "retrospective": {

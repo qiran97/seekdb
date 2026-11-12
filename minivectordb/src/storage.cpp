@@ -286,6 +286,10 @@ Status UndoLog::records_from(uint64_t offset, std::vector<UndoRecord>* records) 
     uint64_t txn_id = load_u64(header + 8);
     uint64_t page_id = load_u64(header + 16);
     uint32_t length = load_u32(header + 24);
+    // A record of the log holds a page image or nothing.  A length that is
+    // bigger is the sign of a damaged log, it must not make the program
+    // reserve gigabytes of memory.
+    if (length > kPageSize) break;
     UndoRecord record;
     record.type = type;
     record.txn_id = txn_id;

@@ -132,6 +132,11 @@ Status parse_statement(const std::string& sql, Statement* out);
 Status parse_first_statement(const std::string& sql, Statement* out,
                               size_t* length);
 
+// True when the text holds nothing but spaces, semicolons and comments.
+// The driver sends one statement per request, a text that holds more than
+// one statement is not silently reduced to its first part.
+bool only_statement_separators(const std::string& text);
+
 // Splits a script into individual statements.  Semicolons inside string
 // literals and comments do not terminate a statement.
 std::vector<std::string> split_statements(const std::string& script);

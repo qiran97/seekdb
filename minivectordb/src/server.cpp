@@ -342,9 +342,17 @@ void Server::handle_statement(const std::string& statement) {
     fprintf(stderr, "[stmt] %s\n", statement.c_str());
   }
   Statement parsed;
-  Status status = parse_statement(statement, &parsed);
+  size_t used = 0;
+  Status status = parse_first_statement(statement, &parsed, &used);
   if (!status.ok()) {
     write_error(status);
+    return;
+  }
+  // Only the first statement of the text would be executed, the rest of it
+  // must not be dropped without a word.
+  if (!only_statement_separators(statement.substr(used))) {
+    write_error(Status::Error(ErrorCode::kUnsupportedYet,
+                              "only one statement per request is supported"));
     return;
   }
   if (parsed.type == StatementType::kEmpty) return;
@@ -415,9 +423,17 @@ void Server::handle_json_request(const std::string& line) {
     engine_.set_search_mode_ann(mode_value->text == "ann");
   }
   Statement parsed;
-  Status status = parse_statement(sql_value->text, &parsed);
+  size_t used = 0;
+  Status status = parse_first_statement(sql_value->text, &parsed, &used);
   if (!status.ok()) {
     write_json_error(id, status);
+    return;
+  }
+  // Only the first statement of the text would be executed, the rest of it
+  // must not be dropped without a word.
+  if (!only_statement_separators(sql_value->text.substr(used))) {
+    write_json_error(id, Status::Error(ErrorCode::kUnsupportedYet,
+                                       "only one statement per request is supported"));
     return;
   }
   if (parsed.type == StatementType::kEmpty) {
@@ -462,7 +478,17 @@ int Server::run_jsonl() {
     }
     std::string line = pending.substr(0, newline);
     pending.erase(0, newline + 1);
-    if (!trim(line).empty()) handle_json_request(line);
+    if (!trim(line).empty()) {
+      // A statement that fails with an exception must not take the program
+      // down, the driver waits for an answer.
+      try {
+        handle_json_request(line);
+      } catch (const std::exception& error) {
+        log_error("the request failed: %s", error.what());
+        write_line("{\"ok\":false,\"error\":{\"code\":\"internal_error\","
+                   "\"message\":\"the statement could not be executed\"}}");
+      }
+    }
     if (engine_.shutdown_requested()) break;
   }
   if (!engine_.shutdown_requested()) {

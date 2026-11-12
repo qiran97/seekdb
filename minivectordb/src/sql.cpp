@@ -898,6 +898,38 @@ Status parse_first_statement(const std::string& sql, Statement* out,
   return Status::Ok();
 }
 
+bool only_statement_separators(const std::string& text) {
+  size_t i = 0;
+  const size_t size = text.size();
+  while (i < size) {
+    char c = text[i];
+    if (std::isspace(static_cast<unsigned char>(c))) {
+      ++i;
+      continue;
+    }
+    if (c == ';') {
+      ++i;
+      continue;
+    }
+    if (c == '-' && i + 1 < size && text[i + 1] == '-') {
+      while (i < size && text[i] != '\n') ++i;
+      continue;
+    }
+    if (c == '#') {
+      while (i < size && text[i] != '\n') ++i;
+      continue;
+    }
+    if (c == '/' && i + 1 < size && text[i + 1] == '*') {
+      i += 2;
+      while (i + 1 < size && !(text[i] == '*' && text[i + 1] == '/')) ++i;
+      i = (i + 1 < size) ? i + 2 : size;
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
 std::vector<std::string> split_statements(const std::string& script) {
   std::vector<std::string> statements;
   std::string current;
