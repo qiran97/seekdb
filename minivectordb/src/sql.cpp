@@ -323,7 +323,7 @@ class Parser {
                                  "VARCHAR requires a length");
           }
           int64_t length = 0;
-          if (!parse_int64(token_.text, &length) || length <= 0) {
+          if (!parse_int64(token_.text, &length) || length < 0) {
             return Status::Error(ErrorCode::kSyntaxError,
                                  "invalid VARCHAR length: " + token_.text);
           }
@@ -515,7 +515,13 @@ class Parser {
         OrderByItem item;
         if (token_.type == TokenType::kNumber && !token_.is_float) {
           int64_t ordinal = 0;
-          parse_int64(token_.text, &ordinal);
+          Status status = parse_number(token_.text, &ordinal);
+          if (!status.ok()) return status;
+          if (ordinal <= 0 || ordinal > 0x7fffffff) {
+            return Status::Error(ErrorCode::kSyntaxError,
+                                 "the ORDER BY position is out of range: " +
+                                     token_.text);
+          }
           item.ordinal = static_cast<int>(ordinal);
           advance();
         } else {
@@ -537,7 +543,8 @@ class Parser {
         return Status::Error(ErrorCode::kSyntaxError, "expected LIMIT value");
       }
       int64_t first = 0;
-      parse_int64(token_.text, &first);
+      Status status = parse_number(token_.text, &first);
+      if (!status.ok()) return status;
       advance();
       if (accept_punct(",")) {
         // MySQL style "LIMIT offset, count".
@@ -545,7 +552,8 @@ class Parser {
           return Status::Error(ErrorCode::kSyntaxError, "expected LIMIT value");
         }
         int64_t second = 0;
-        parse_int64(token_.text, &second);
+        Status status = parse_number(token_.text, &second);
+        if (!status.ok()) return status;
         advance();
         out->offset = first;
         out->limit = second;
@@ -556,7 +564,8 @@ class Parser {
             return Status::Error(ErrorCode::kSyntaxError, "expected OFFSET value");
           }
           int64_t offset = 0;
-          parse_int64(token_.text, &offset);
+          Status status = parse_number(token_.text, &offset);
+          if (!status.ok()) return status;
           advance();
           out->offset = offset;
         }
@@ -710,6 +719,16 @@ class Parser {
   }
 
   // --- expressions ----------------------------------------------------
+  // Reads a number that has to fit into a 64 bit integer.  A number that is
+  // too big is an error, it must not become a zero.
+  Status parse_number(std::string_view text, int64_t* out) {
+    if (!parse_int64(text, out)) {
+      return Status::Error(ErrorCode::kNumberOutOfRange,
+                           "the number is out of range: " + std::string(text));
+    }
+    return Status::Ok();
+  }
+
   Status parse_expr(std::unique_ptr<Expr>* out) {
     if (token_.type == TokenType::kNumber) {
       std::unique_ptr<Expr> expr(new Expr());
@@ -719,7 +738,8 @@ class Parser {
       } else {
         expr->type = ExprType::kIntLiteral;
         int64_t value = 0;
-        parse_int64(token_.text, &value);
+        Status status = parse_number(token_.text, &value);
+        if (!status.ok()) return status;
         expr->int_value = value;
       }
       advance();

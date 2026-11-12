@@ -1,0 +1,34 @@
+MiniVectorDB ready
+-- MVDB-END --
+-- MVDB-END --
+ERROR 1690 the number is out of range: 99999999999999999999
+-- MVDB-END --
+ERROR 1690 the number is out of range: 99999999999999999999
+-- MVDB-END --
+ERROR 1406 value is too long for column 's'
+-- MVDB-END --
+-- MVDB-END --
+id
+1
+4
+-- MVDB-END --
+ERROR 1690 the number is out of range: 99999999999999999999
+-- MVDB-END --
+ERROR 1690 the number is out of range: 99999999999999999999
+-- MVDB-END --
+ERROR 1690 the number is out of range: 99999999999999999999
+-- MVDB-END --
+ERROR 1064 the ORDER BY position is out of range: 0
+-- MVDB-END --
+ERROR 1064 ORDER BY position is out of range
+-- MVDB-END --
+-- MVDB-END --
+ERROR 1690 the number is out of range: -9223372036854775809
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+ERROR 1406 value is too long for column 's'
+-- MVDB-END --
+id	s
+1	
+-- MVDB-END --
