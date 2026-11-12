@@ -98,9 +98,13 @@ def check_sql_and_storage(db, rng, work):
     if len(db.rows("SELECT id FROM docs;")) != 4:
         return "the failed insert changed the row count"
     # the numbers that do not fit are an error
-    answer = db.request("INSERT INTO docs VALUES (99999999999999999999, 'x', 'y', '[0]');")
+    vector = ",".join("0.1" for _ in range(DIM))
+    answer = db.request("INSERT INTO docs VALUES (99999999999999999999, 'x', 'y',"
+                        " '[%s]');" % vector)
     if answer.get("ok") is not False:
         return "the number that does not fit was accepted"
+    if len(db.rows("SELECT id FROM docs;")) != 4:
+        return "the number that does not fit was written into the table"
     # the length of a VARCHAR counts the unicode characters
     db.request("CREATE TABLE u (id BIGINT PRIMARY KEY, t VARCHAR(4));")
     if db.request("INSERT INTO u VALUES (1, '中文字');").get("ok") is not True:
@@ -112,6 +116,37 @@ def check_sql_and_storage(db, rng, work):
     db.start()
     if len(db.rows("SELECT id FROM docs;")) != 4:
         return "the row count changed after the restart"
+    return None
+
+
+def check_big_vector(db, rng, work):
+    """A row that is bigger than the half of a page does not fit into a leaf
+    together with another row.  The leaf has to be split, a table with such a
+    column has to hold more than one row."""
+    dim = 512
+    db.request("CREATE TABLE wide (id BIGINT PRIMARY KEY, embedding VECTOR(%d));" % dim)
+    truth = []
+    for index in range(1, 13):
+        vector = [f32(rng.uniform(-1, 1)) for _ in range(dim)]
+        truth.append((index, vector))
+        answer = db.request("INSERT INTO wide VALUES (%d, '[%s]');" %
+                            (index, ",".join("%.9g" % x for x in vector)))
+        if answer.get("ok") is not True:
+            return "the insert of the row %d failed: %r" % (index, answer)
+    answer = db.request("SELECT id FROM wide;")
+    if len(answer.get("rows", [])) != 12:
+        return "only %d of the 12 rows are there" % len(answer.get("rows", []))
+    query = [f32(rng.uniform(-1, 1)) for _ in range(dim)]
+    literal = ",".join("%.9g" % x for x in query)
+    answer = db.request("SELECT id, L2_DISTANCE(embedding, '[%s]') AS distance"
+                        " FROM wide ORDER BY distance LIMIT 5;" % literal)
+    if not answer.get("ok"):
+        return "the search over the wide table failed: %r" % answer
+    expected = sorted(truth, key=lambda row: (math.sqrt(sum((a - b) ** 2 for a, b in
+                                                              zip(row[1], query))), row[0]))[:5]
+    if [row[0] for row in answer["rows"]] != [row[0] for row in expected]:
+        return "the order is %r, expected %r" % ([row[0] for row in answer["rows"]],
+                                                 [row[0] for row in expected])
     return None
 
 
@@ -369,6 +404,7 @@ def main():
     failures = 0
     try:
         simple = [("SQL and storage", check_sql_and_storage),
+                  ("big vector", check_big_vector),
                   ("exact search", check_exact_search),
                   ("approximate search", check_approximate_search),
                   ("index maintenance", check_index_maintenance),
@@ -403,7 +439,7 @@ def main():
             print("PASS %-20s" % "resources")
     finally:
         shutil.rmtree(root, ignore_errors=True)
-    print("%d of 7 categories failed" % failures)
+    print("%d of 8 categories failed" % failures)
     return 1 if failures else 0
 
 
