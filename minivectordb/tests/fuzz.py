@@ -467,7 +467,7 @@ def generate(rng, iterations):
 def run(binary, statements, workdir):
     """Runs the statements and returns the answers of the database."""
     process = subprocess.Popen(
-        [binary, "--data-dir", workdir],
+        [binary, "--data-dir", workdir, "--protocol", "text"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -513,7 +513,7 @@ def run_with_state(binary, statements, states):
     every statement with the state of the reference model."""
     workdir = tempfile.mkdtemp(prefix="mvdb-txn-")
     process = subprocess.Popen(
-        [binary, "--data-dir", workdir],
+        [binary, "--data-dir", workdir, "--protocol", "text"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -746,7 +746,7 @@ def run_recover(binary, rng, iterations):
         else:
             kill_index = rng.randrange(1, len(statements))
         process = subprocess.Popen(
-            [binary, "--data-dir", data_dir],
+            [binary, "--data-dir", data_dir, "--protocol", "text"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -770,7 +770,7 @@ def run_recover(binary, rng, iterations):
         process.wait(timeout=30)
 
         process = subprocess.Popen(
-            [binary, "--data-dir", data_dir],
+            [binary, "--data-dir", data_dir, "--protocol", "text"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,

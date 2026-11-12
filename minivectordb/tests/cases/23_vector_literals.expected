@@ -1,0 +1,32 @@
+MiniVectorDB ready
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+ERROR 1416 empty vector literal
+-- MVDB-END --
+ERROR 1416 malformed vector literal: empty element
+-- MVDB-END --
+ERROR 1416 malformed vector literal: empty element
+-- MVDB-END --
+ERROR 1416 malformed vector literal: empty element
+-- MVDB-END --
+ERROR 1416 malformed vector literal: missing closing ']'
+-- MVDB-END --
+ERROR 1416 vector element is not a number: a
+-- MVDB-END --
+ERROR 1416 vector element is not a number: 1.5x
+-- MVDB-END --
+ERROR 1416 vector element is not a number: 1.0 2.0
+-- MVDB-END --
+ERROR 1416 vector element is not a finite number: 1e400
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+-- MVDB-END --
+id	vec
+1	[1, 2]
+2	[1, 2]
+12	[-1.5, 2.5]
+13	[1.5, -2.5]
+14	[16, 1]
+-- MVDB-END --

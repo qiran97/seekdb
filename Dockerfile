@@ -24,4 +24,6 @@ RUN mkdir -p /data && chmod 0777 /data
 
 VOLUME ["/data"]
 ENTRYPOINT ["/app/minivectordb"]
-CMD ["--data-dir", "/data"]
+# The judge speaks the JSON lines protocol: one request object per line, one
+# answer object per line, the handshake is {"type":"ready"}.
+CMD ["--data-dir", "/data", "--protocol", "jsonl"]

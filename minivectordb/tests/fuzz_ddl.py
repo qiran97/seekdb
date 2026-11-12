@@ -38,7 +38,7 @@ class Server:
 
     def start(self):
         self.process = subprocess.Popen(
-            [self.binary, "--data-dir", self.data_dir],
+            [self.binary, "--data-dir", self.data_dir, "--protocol", "text"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,

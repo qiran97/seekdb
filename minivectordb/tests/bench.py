@@ -126,7 +126,7 @@ def main():
             )
 
     process = subprocess.Popen(
-        [binary, "--data-dir", data_dir, "--log-level", "0"],
+        [binary, "--data-dir", data_dir, "--log-level", "0", "--protocol", "text"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,

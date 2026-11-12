@@ -48,6 +48,27 @@ const char* error_code_name(ErrorCode code) {
   return "ER_UNKNOWN_ERROR";
 }
 
+const char* error_code_slug(ErrorCode code) {
+  switch (code) {
+    case ErrorCode::kOk: return "ok";
+    case ErrorCode::kSyntaxError: return "syntax_error";
+    case ErrorCode::kUnknownTable: return "unknown_table";
+    case ErrorCode::kTableExists: return "table_exists";
+    case ErrorCode::kUnknownColumn: return "unknown_column";
+    case ErrorCode::kDuplicateKey: return "duplicate_key";
+    case ErrorCode::kDataTooLong: return "data_too_long";
+    case ErrorCode::kInvalidVector: return "invalid_vector";
+    case ErrorCode::kDimensionMismatch: return "dimension_mismatch";
+    case ErrorCode::kNumberOutOfRange: return "number_out_of_range";
+    case ErrorCode::kUnsupportedYet: return "unsupported_sql";
+    case ErrorCode::kIoError: return "io_error";
+    case ErrorCode::kStorageCorrupt: return "storage_corrupt";
+    case ErrorCode::kTransactionError: return "transaction_error";
+    case ErrorCode::kInternalError: return "internal_error";
+  }
+  return "unknown_error";
+}
+
 void log_info(const char* fmt, ...) {
   if (g_log_level < 1) return;
   va_list args;

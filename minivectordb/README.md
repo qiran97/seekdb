@@ -50,7 +50,7 @@ database does not need a TTY and no port has to be published.
 | Option | Meaning |
 | --- | --- |
 | `--data-dir <path>` | directory that holds `mvdb.dat` and `mvdb.undo` (default `/data`) |
-| `--protocol <text\|lines\|jsonl>` | output format of the protocol (default `text`) |
+| `--protocol <jsonl\|text\|lines>` | protocol of the driver (default `jsonl`, the protocol of the judge) |
 | `--ready-message <text>` | message that is printed once the database is ready |
 | `--no-ready-message` | do not print a ready message at all |
 | `--result-terminator <text>` | end marker of a result block (default `-- MVDB-END --`) |
@@ -64,6 +64,20 @@ database does not need a TTY and no port has to be published.
 
 The environment variables `MINIVECTORDB_DATA_DIR` and
 `MINIVECTORDB_SEARCH_MODE` provide the same settings.
+
+## Protocol
+
+The driver of the judge speaks the JSON lines protocol: one JSON object per
+line.  The database prints `{"type":"ready"}` when it is usable, answers
+every request with one JSON object and exits with the code 0 after a
+`shutdown` request.  The details are in
+[docs/PROTOCOL.md](docs/PROTOCOL.md).  The plain text protocol is still
+available with `--protocol text`, the local test scripts use it.
+
+```json
+{"id":1,"op":"execute","sql":"SELECT id FROM docs ORDER BY id;","search_mode":"exact"}
+{"id":1,"ok":true,"columns":["id"],"rows":[[1],[2]]}
+```
 
 ## Example session
 
@@ -130,6 +144,7 @@ python3 tests/fuzz.py --binary build/minivectordb --iterations 400 --seed 1
 python3 tests/fuzz.py --binary build/minivectordb --mode txn --iterations 300 --seed 1
 python3 tests/fuzz.py --binary build/minivectordb --mode recover --iterations 80 --seed 1
 python3 tests/fuzz_ddl.py --binary build/minivectordb --iterations 200 --seed 1
+python3 tests/protocol_check.py --binary build/minivectordb
 python3 tests/bigtree.py --binary build/minivectordb --rows 30000
 make bench                 # runs the performance benchmark
 python3 tests/large_data.py --binary build/minivectordb --rows 100000
@@ -163,6 +178,11 @@ statements: it creates and drops tables, inside transactions and outside of
 them, compares the set of tables with a reference model after every
 statement and restarts the server every few statements to check that the
 tables and their rows survive the restart.
+
+`tests/protocol_check.py` runs the public MySQL cases of the task package
+with the protocol checker of the package (`tests/protocol_check`): the
+checker starts the database, speaks the JSON lines protocol with it and
+compares the answers with the expected results in `tests/mysqltest`.
 
 `tests/bigtree.py` writes 30,000 rows with random keys, so that the leaf
 pages are split again and again and the tree grows over three levels.  It

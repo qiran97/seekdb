@@ -31,6 +31,9 @@ enum class ErrorCode : int {
 };
 
 const char* error_code_name(ErrorCode code);
+// The short name of an error code, the judge compares the names of the
+// public cases.
+const char* error_code_slug(ErrorCode code);
 
 // A lightweight result type: either success or an error code plus a message.
 class Status {

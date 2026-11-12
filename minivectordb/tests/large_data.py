@@ -85,6 +85,7 @@ def main():
     rng = random.Random(args.seed)
     process = subprocess.Popen(
         [binary, "--data-dir", data_dir, "--log-level", "0",
+         "--protocol", "text",
          "--cache-budget", str(args.cache_budget),
          "--buffer-pool", str(args.buffer_pool)],
         stdin=subprocess.PIPE,
@@ -138,6 +139,7 @@ def main():
         process.wait(timeout=120)
         process = subprocess.Popen(
             [binary, "--data-dir", data_dir, "--log-level", "0",
+             "--protocol", "text",
              "--cache-budget", str(args.cache_budget),
              "--buffer-pool", str(args.buffer_pool)],
             stdin=subprocess.PIPE,

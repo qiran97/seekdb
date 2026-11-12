@@ -70,7 +70,7 @@ def run_case(binary, case_path, update=False):
 
     def spawn():
         process = subprocess.Popen(
-            [binary, "--data-dir", data_dir] + options,
+            [binary, "--data-dir", data_dir, "--protocol", "text"] + options,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,

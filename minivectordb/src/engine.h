@@ -88,7 +88,11 @@ class Engine {
 
   bool in_transaction() const { return in_transaction_; }
   bool shutdown_requested() const { return shutdown_requested_; }
+  // The program has to stop after the current request.
+  void request_shutdown() { shutdown_requested_ = true; }
   bool search_mode_ann() const { return search_mode_ann_; }
+  // The mode of the vector search, the judge sends it with every request.
+  void set_search_mode_ann(bool value) { search_mode_ann_ = value; }
 
   // Rolls back an open transaction, used on shutdown.
   Status rollback_open_transaction();

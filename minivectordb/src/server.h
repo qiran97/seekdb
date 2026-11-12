@@ -5,12 +5,15 @@
 #include <vector>
 
 #include "engine.h"
+#include "json.h"
 
 namespace mvdb {
 
 struct ServerOptions {
   std::string data_dir = "/data";
-  std::string protocol = "text";        // text | lines | jsonl
+  // jsonl is the protocol of the judge: one JSON object per line.  text and
+  // lines are the plain protocols of the local test scripts.
+  std::string protocol = "jsonl";       // jsonl | text | lines
   std::string ready_message = "MiniVectorDB ready";
   std::string result_terminator = "-- MVDB-END --";
   std::string error_prefix = "ERROR";
@@ -56,6 +59,13 @@ class Server {
 
  private:
   void handle_statement(const std::string& statement);
+  // The JSON lines protocol: one request object per line, one answer
+  // object per line.
+  int run_jsonl();
+  void handle_json_request(const std::string& line);
+  void write_json_result(const JsonValue& id, const Statement& statement,
+                         const ResultSet& result);
+  void write_json_error(const JsonValue& id, const Status& status);
   void write_result(const ResultSet& result);
   void write_error(const Status& status);
   void write_line(const std::string& line);

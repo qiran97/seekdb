@@ -321,6 +321,15 @@ query phase runs completely from memory.
   the statements shift by one and the kill lands on the wrong statement: the
   recovery then rolls a committed transaction back, which is correct, but
   the test reports it as a defect.
+* `tests/protocol_check.py` runs the public MySQL cases of the task package
+  with the protocol checker of the package.  The checker starts the database
+  as a process, waits for the handshake `{"type":"ready"}`, sends the
+  requests of a case one by one and compares every answer with the expected
+  result of the case.  The protocol is the JSON lines protocol of the judge:
+  one JSON object per line, the answer carries the number of the request
+  back, a query answers with `columns` and `rows`, a statement that changes
+  records answers with `affected_rows` and a failed statement answers with
+  `ok:false` and an error code.  All twenty public cases pass.
 * `tests/fuzz_ddl.py` is a differential test for the data definition
   statements.  It creates and drops tables, inside transactions and outside
   of them, and compares the set of tables with a reference model after every

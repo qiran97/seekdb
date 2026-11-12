@@ -1118,6 +1118,29 @@ Status Engine::execute_insert(const Statement& statement, ResultSet* result) {
         key_set = true;
         continue;
       }
+      if (column.type == ColumnType::kBigInt) {
+        // The value of a BIGINT column is kept as its decimal text, the
+        // executor reads it back as an integer.
+        int64_t number = 0;
+        if (expr.type == ExprType::kIntLiteral) {
+          number = expr.int_value;
+        } else if (expr.type == ExprType::kStringLiteral) {
+          if (!parse_int64(expr.str_value, &number)) {
+            return Status::Error(ErrorCode::kSyntaxError,
+                                 "column '" + column.name +
+                                     "' expects an integer value");
+          }
+        } else {
+          return Status::Error(ErrorCode::kSyntaxError,
+                               "column '" + column.name + "' expects an integer value");
+        }
+        int position = value_position(table->def, column_index);
+        if (position < 0 || position >= static_cast<int>(values.strings.size())) {
+          return Status::Error(ErrorCode::kInternalError, "column mapping is broken");
+        }
+        values.strings[position] = std::to_string(number);
+        continue;
+      }
       if (column.type == ColumnType::kVarchar) {
         if (expr.type != ExprType::kStringLiteral) {
           return Status::Error(ErrorCode::kSyntaxError,
@@ -1197,7 +1220,21 @@ Status Engine::execute_update(const Statement& statement, ResultSet* result) {
     resolved.column = index;
     resolved.value_position = static_cast<size_t>(value_position(table->def, index));
     const ColumnDef& column = table->def.columns[index];
-    if (column.type == ColumnType::kVarchar) {
+    if (column.type == ColumnType::kBigInt) {
+      int64_t number = 0;
+      if (assignment.value->type == ExprType::kIntLiteral) {
+        number = assignment.value->int_value;
+      } else if (assignment.value->type == ExprType::kStringLiteral) {
+        if (!parse_int64(assignment.value->str_value, &number)) {
+          return Status::Error(ErrorCode::kSyntaxError,
+                               "column '" + column.name + "' expects an integer value");
+        }
+      } else {
+        return Status::Error(ErrorCode::kSyntaxError,
+                             "column '" + column.name + "' expects an integer value");
+      }
+      resolved.text = std::to_string(number);
+    } else if (column.type == ColumnType::kVarchar) {
       if (assignment.value->type != ExprType::kStringLiteral) {
         return Status::Error(ErrorCode::kSyntaxError,
                              "column '" + column.name + "' expects a string value");

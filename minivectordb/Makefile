@@ -35,6 +35,7 @@ test: $(TARGET)
 	python3 tests/fuzz.py --binary $(TARGET) --mode txn --iterations 300 --seed 1
 	python3 tests/fuzz.py --binary $(TARGET) --mode recover --iterations 80 --seed 1
 	python3 tests/fuzz_ddl.py --binary $(TARGET) --iterations 200 --seed 1
+	python3 tests/protocol_check.py --binary $(TARGET)
 	python3 tests/bigtree.py --binary $(TARGET) --rows 30000
 
 bench: $(TARGET)

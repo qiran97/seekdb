@@ -223,6 +223,30 @@ size_t take_pending_statement(StatementReader* reader, std::string* statement) {
   return length;
 }
 
+// Writes a cell of a result set as a JSON value.
+void json_write_cell(std::string* out, const ResultCell& cell) {
+  switch (cell.type) {
+    case ResultCell::Type::kInteger:
+      json_write_integer(out, cell.number);
+      break;
+    case ResultCell::Type::kReal:
+      json_write_real(out, cell.real);
+      break;
+    case ResultCell::Type::kText:
+      json_write_string(out, cell.text);
+      break;
+    case ResultCell::Type::kVector: {
+      out->push_back('[');
+      for (size_t i = 0; i < cell.vector.size(); ++i) {
+        if (i != 0) out->push_back(',');
+        json_write_real(out, static_cast<double>(cell.vector[i]));
+      }
+      out->push_back(']');
+      break;
+    }
+  }
+}
+
 void Server::write_line(const std::string& line) {
   fwrite(line.data(), 1, line.size(), stdout);
   fputc('\n', stdout);
@@ -230,12 +254,6 @@ void Server::write_line(const std::string& line) {
 }
 
 void Server::write_error(const Status& status) {
-  if (options_.protocol == "jsonl") {
-    std::string line = "{\"error\":{\"code\":" + std::to_string(status.numeric_code()) +
-                       ",\"message\":\"" + json_escape(status.message()) + "\"}}";
-    write_line(line);
-    return;
-  }
   std::string line = options_.error_prefix + " " +
                      std::to_string(status.numeric_code()) + " " + status.message();
   write_line(line);
@@ -244,12 +262,16 @@ void Server::write_error(const Status& status) {
   }
 }
 
-void Server::write_result(const ResultSet& result) {
-  if (options_.protocol == "jsonl") {
-    std::string line = "{\"columns\":[";
+void Server::write_json_result(const JsonValue& id, const Statement& statement,
+                               const ResultSet& result) {
+  std::string line = "{\"id\":";
+  json_write_value(&line, id);
+  line += ",\"ok\":true";
+  if (result.has_result_set) {
+    line += ",\"columns\":[";
     for (size_t i = 0; i < result.columns.size(); ++i) {
       if (i != 0) line += ",";
-      line += "\"" + json_escape(result.columns[i]) + "\"";
+      json_write_string(&line, result.columns[i]);
     }
     line += "],\"rows\":[";
     for (size_t r = 0; r < result.rows.size(); ++r) {
@@ -257,14 +279,32 @@ void Server::write_result(const ResultSet& result) {
       line += "[";
       for (size_t c = 0; c < result.rows[r].size(); ++c) {
         if (c != 0) line += ",";
-        line += "\"" + json_escape(cell_to_text(result.rows[r][c])) + "\"";
+        json_write_cell(&line, result.rows[r][c]);
       }
       line += "]";
     }
-    line += "],\"affected_rows\":" + std::to_string(result.affected_rows) + "}";
-    write_line(line);
-    return;
+    line += "]";
+  } else if (statement.type == StatementType::kInsert ||
+             statement.type == StatementType::kUpdate ||
+             statement.type == StatementType::kDelete) {
+    line += ",\"affected_rows\":" + std::to_string(result.affected_rows);
   }
+  line += "}";
+  write_line(line);
+}
+
+void Server::write_json_error(const JsonValue& id, const Status& status) {
+  std::string line = "{\"id\":";
+  json_write_value(&line, id);
+  line += ",\"ok\":false,\"error\":{\"code\":";
+  json_write_string(&line, error_code_slug(status.code()));
+  line += ",\"message\":";
+  json_write_string(&line, status.message());
+  line += "}}";
+  write_line(line);
+}
+
+void Server::write_result(const ResultSet& result) {
   if (options_.protocol == "text" && result.has_result_set) {
     if (options_.print_header && !result.columns.empty()) {
       std::string header;
@@ -317,6 +357,127 @@ void Server::handle_statement(const std::string& statement) {
   write_result(result);
 }
 
+void Server::handle_json_request(const std::string& line) {
+  JsonValue request;
+  if (!parse_json(line, &request) || !request.is_object()) {
+    log_error("the request is not a JSON object: %s", line.c_str());
+    write_line("{\"ok\":false,\"error\":{\"code\":\"bad_request\","
+               "\"message\":\"the request is not a JSON object\"}}");
+    return;
+  }
+  const JsonValue* id_value = request.find("id");
+  const JsonValue* op_value = request.find("op");
+  if (id_value == nullptr) {
+    write_line("{\"ok\":false,\"error\":{\"code\":\"bad_request\","
+               "\"message\":\"the request has no id\"}}");
+    return;
+  }
+  static const JsonValue kNoId;
+  const JsonValue& id = id_value == nullptr ? kNoId : *id_value;
+  if (op_value == nullptr || !op_value->is_string()) {
+    write_json_error(id, Status::Error(ErrorCode::kSyntaxError,
+                                       "the request has no op"));
+    return;
+  }
+  const std::string& op = op_value->text;
+  if (op == "shutdown") {
+    // The transaction that is still open is rolled back, the data is
+    // written, the answer is the last line of the output.
+    Status status = engine_.rollback_open_transaction();
+    if (!status.ok()) {
+      log_error("rollback on shutdown failed: %s", status.message().c_str());
+    }
+    status = engine_.close();
+    if (!status.ok()) {
+      log_error("shutdown failed: %s", status.message().c_str());
+    }
+    std::string line_out = "{\"id\":";
+    json_write_value(&line_out, id);
+    line_out += ",\"ok\":true}";
+    write_line(line_out);
+    engine_.request_shutdown();
+    return;
+  }
+  if (op != "execute") {
+    write_json_error(id, Status::Error(ErrorCode::kUnsupportedYet,
+                                       "unknown operation '" + op + "'"));
+    return;
+  }
+  const JsonValue* sql_value = request.find("sql");
+  if (sql_value == nullptr || !sql_value->is_string()) {
+    write_json_error(id, Status::Error(ErrorCode::kSyntaxError,
+                                       "the request has no sql"));
+    return;
+  }
+  // The mode of the vector search belongs to the request.
+  const JsonValue* mode_value = request.find("search_mode");
+  if (mode_value != nullptr && mode_value->is_string()) {
+    engine_.set_search_mode_ann(mode_value->text == "ann");
+  }
+  Statement parsed;
+  Status status = parse_statement(sql_value->text, &parsed);
+  if (!status.ok()) {
+    write_json_error(id, status);
+    return;
+  }
+  if (parsed.type == StatementType::kEmpty) {
+    std::string line_out = "{\"id\":";
+    json_write_value(&line_out, id);
+    line_out += ",\"ok\":true}";
+    write_line(line_out);
+    return;
+  }
+  ResultSet result;
+  status = engine_.execute(parsed, &result);
+  if (!status.ok()) {
+    write_json_error(id, status);
+    return;
+  }
+  write_json_result(id, parsed, result);
+}
+
+int Server::run_jsonl() {
+  std::string pending;
+  char chunk[8192];
+  while (true) {
+    size_t newline = pending.find('\n');
+    while (newline == std::string::npos) {
+      ssize_t received = read(0, chunk, sizeof(chunk));
+      if (received < 0) {
+        if (errno == EINTR) continue;
+        return 1;
+      }
+      if (received == 0) break;
+      pending.append(chunk, static_cast<size_t>(received));
+      newline = pending.find('\n');
+    }
+    if (newline == std::string::npos) {
+      // The input ended.  A last line without a newline is a request too.
+      if (!pending.empty()) {
+        std::string line = pending;
+        pending.clear();
+        if (!trim(line).empty()) handle_json_request(line);
+      }
+      break;
+    }
+    std::string line = pending.substr(0, newline);
+    pending.erase(0, newline + 1);
+    if (!trim(line).empty()) handle_json_request(line);
+    if (engine_.shutdown_requested()) break;
+  }
+  if (!engine_.shutdown_requested()) {
+    Status status = engine_.rollback_open_transaction();
+    if (!status.ok()) {
+      log_error("rollback on shutdown failed: %s", status.message().c_str());
+    }
+    status = engine_.close();
+    if (!status.ok()) {
+      log_error("shutdown failed: %s", status.message().c_str());
+    }
+  }
+  return 0;
+}
+
 int Server::run() {
   log_set_level(options_.log_level);
   const size_t memory_limit = detect_memory_limit();
@@ -345,6 +506,11 @@ int Server::run() {
   }
   log_info("minivectordb ready, data dir %s, buffer pool %zu bytes, cache budget %zu bytes",
            options_.data_dir.c_str(), buffer_pool, cache_budget);
+  if (options_.protocol == "jsonl") {
+    // The handshake of the judge: one JSON object, nothing else.
+    write_line("{\"type\":\"ready\"}");
+    return run_jsonl();
+  }
   if (options_.print_ready && !options_.ready_message.empty()) {
     write_line(options_.ready_message);
   }

@@ -49,6 +49,12 @@ class Lexer {
     char c = text_[pos_];
     if (is_ident_start(c)) return lex_identifier(token);
     if (isdigit(static_cast<unsigned char>(c))) return lex_number(token);
+    // A minus in front of a digit belongs to the number.  The SQL subset
+    // has no arithmetic, a minus is never an operator.
+    if (c == '-' && pos_ + 1 < text_.size() &&
+        isdigit(static_cast<unsigned char>(text_[pos_ + 1]))) {
+      return lex_number(token);
+    }
     if (c == '\'' || c == '"') return lex_string(token, error);
     return lex_punct(token);
   }
@@ -105,6 +111,7 @@ class Lexer {
   bool lex_number(Token* token) {
     size_t start = pos_;
     bool is_float = false;
+    if (pos_ < text_.size() && (text_[pos_] == '-' || text_[pos_] == '+')) ++pos_;
     while (pos_ < text_.size() && isdigit(static_cast<unsigned char>(text_[pos_]))) ++pos_;
     if (pos_ < text_.size() && text_[pos_] == '.') {
       is_float = true;
