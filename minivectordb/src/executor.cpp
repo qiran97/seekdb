@@ -187,9 +187,10 @@ SortKey make_sort_key(const ValueExtractor& extractor, const TableDef& def,
   SortKey key;
   if (extractor.kind == ValueExtractor::Kind::kDistance) {
     key.type = SortKey::Type::kReal;
+    // The square of the distance orders the rows like the distance.
     const std::vector<float>& stored = row.vector;
     size_t dim = std::min(stored.size(), extractor.query_vector.size());
-    key.real = l2_distance(stored.data(), extractor.query_vector.data(), dim);
+    key.real = l2_distance_squared(stored.data(), extractor.query_vector.data(), dim);
     return key;
   }
   ResultCell cell = evaluate_extractor(extractor, def, row);
@@ -578,9 +579,12 @@ Status Engine::execute_select(const Statement& statement, ResultSet* result) {
       if (integer_key) {
         sort_key = static_cast<double>(key);
       } else {
+        // The square of the distance orders the rows like the distance, the
+        // square root of every row is saved.  The distance of the rows that
+        // enter the queue is computed again for the answer.
         const std::vector<float>& stored = row.vector;
         size_t dim = std::min(stored.size(), extractor.query_vector.size());
-        sort_key = l2_distance(stored.data(), extractor.query_vector.data(), dim);
+        sort_key = l2_distance_squared(stored.data(), extractor.query_vector.data(), dim);
       }
       if (top_k.full()) {
         if (!top_k.better(sort_key, key)) return true;

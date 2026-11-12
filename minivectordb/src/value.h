@@ -30,6 +30,14 @@ std::string format_vector(const std::vector<float>& values);
 // and independent of the vectorisation width.
 double l2_distance(const float* a, const float* b, size_t dim);
 
+// The sum of the squares of the differences of two float32 vectors.  It is
+// the square of the L2 distance, the square root is monotone and the order of
+// two rows is the same for the distance and for its square.  A scan that only
+// sorts by the distance can therefore use the square and skip the square root
+// of every row.  The accumulation is the same as in l2_distance, the square
+// root of the result is bit for bit the distance.
+double l2_distance_squared(const float* a, const float* b, size_t dim);
+
 // Same as l2_distance but with a compile time friendly signature for the
 // scan kernels.
 inline double l2_distance(const std::vector<float>& a, const std::vector<float>& b) {
