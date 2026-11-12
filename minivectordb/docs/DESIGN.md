@@ -330,6 +330,15 @@ query phase runs completely from memory.
   back, a query answers with `columns` and `rows`, a statement that changes
   records answers with `affected_rows` and a failed statement answers with
   `ok:false` and an error code.  All twenty public cases pass.
+* `tests/acceptance.py` follows the acceptance methods of the task package
+  for the seven categories of section 3.2: SQL and storage, the exact
+  search, the approximate search, the index maintenance, the transactions,
+  the recovery and the resources.  The truth is computed by the script
+  itself: the distances of the filtered set are calculated in python with
+  double precision and compared with the answers of the database, the recall
+  of the approximate search is computed on the filtered set, the state after
+  a kill is compared with the state before the kill and the peak memory of a
+  data set that is bigger than the budget is read from the process.
 * `tests/fuzz_ddl.py` is a differential test for the data definition
   statements.  It creates and drops tables, inside transactions and outside
   of them, and compares the set of tables with a reference model after every
