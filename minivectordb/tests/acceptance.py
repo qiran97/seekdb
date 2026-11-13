@@ -257,6 +257,36 @@ def check_index_maintenance(db, rng, work):
     return None
 
 
+def check_search_in_transaction(db, rng, work):
+    """The vector search inside a transaction sees the rows of the
+    transaction, and the rows are gone again after the rollback."""
+    db.request("CREATE TABLE s (id BIGINT PRIMARY KEY, category VARCHAR(8),"
+               " embedding VECTOR(%d));" % DIM)
+    far = ",".join("0.1" for _ in range(DIM))
+    near = ",".join("0.9" for _ in range(DIM))
+    for index in range(1, 21):
+        db.request("INSERT INTO s VALUES (%d, 'keep', '[%s]');" % (index, far))
+    query = ("SELECT id FROM s WHERE category = 'keep' ORDER BY"
+             " L2_DISTANCE(embedding, '[%s]') LIMIT 10;" % near)
+    before = [row[0] for row in db.rows(query, "ann")]
+    if 99 in before:
+        return "the row 99 is there before the transaction"
+    db.request("BEGIN;")
+    db.request("INSERT INTO s VALUES (99, 'keep', '[%s]');" % near)
+    inside = [row[0] for row in db.rows(query, "ann")]
+    if 99 not in inside:
+        return "the search does not see the row of the transaction"
+    if db.rows("SELECT id FROM s WHERE id = 99;") != [[99]]:
+        return "the ordinary query does not see the row of the transaction"
+    db.request("ROLLBACK;")
+    after = [row[0] for row in db.rows(query, "ann")]
+    if 99 in after:
+        return "the search still sees the row after the rollback"
+    if db.rows("SELECT id FROM s WHERE id = 99;"):
+        return "the ordinary query still sees the row after the rollback"
+    return None
+
+
 def check_transactions(db, rng, work):
     """The state after a commit, a rollback and a failed statement, both for
     an ordinary query and for the vector search."""
@@ -409,6 +439,7 @@ def main():
                   ("approximate search", check_approximate_search),
                   ("index maintenance", check_index_maintenance),
                   ("transactions", check_transactions),
+                  ("search in a transaction", check_search_in_transaction),
                   ("recovery", check_recovery)]
         for name, function in simple:
             work = os.path.join(root, name.replace(" ", "-"))
@@ -439,7 +470,7 @@ def main():
             print("PASS %-20s" % "resources")
     finally:
         shutil.rmtree(root, ignore_errors=True)
-    print("%d of 8 categories failed" % failures)
+    print("%d of 9 categories failed" % failures)
     return 1 if failures else 0
 
 

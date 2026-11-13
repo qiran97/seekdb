@@ -254,6 +254,10 @@ class Parser {
     }
   }
 
+  // The deepest nesting of a statement that the parser accepts.
+  static constexpr int kMaxParseDepth = 64;
+  int depth_ = 0;
+
   bool accept_punct(const char* punct) {
     if (token_.type == TokenType::kPunct && token_.text == punct) {
       advance();
@@ -729,7 +733,24 @@ class Parser {
     return Status::Ok();
   }
 
+  // The parser is recursive.  A statement with a deep nesting must not
+  // exhaust the stack of the process, the depth is limited instead.
+  class Depth {
+   public:
+    explicit Depth(int* depth) : depth_(depth) { ++(*depth_); }
+    ~Depth() { --(*depth_); }
+    bool too_deep() const { return *depth_ > kMaxParseDepth; }
+
+   private:
+    int* depth_;
+  };
+
   Status parse_expr(std::unique_ptr<Expr>* out) {
+    Depth depth(&depth_);
+    if (depth.too_deep()) {
+      return Status::Error(ErrorCode::kSyntaxError,
+                           "the statement is nested too deeply");
+    }
     if (token_.type == TokenType::kNumber) {
       std::unique_ptr<Expr> expr(new Expr());
       if (token_.is_float) {
@@ -840,6 +861,11 @@ class Parser {
   }
 
   Status parse_not(std::unique_ptr<Condition>* out) {
+    Depth depth(&depth_);
+    if (depth.too_deep()) {
+      return Status::Error(ErrorCode::kSyntaxError,
+                           "the statement is nested too deeply");
+    }
     if (accept_keyword("NOT")) {
       std::unique_ptr<Condition> child;
       Status status = parse_not(&child);
@@ -854,6 +880,11 @@ class Parser {
   }
 
   Status parse_comparison(std::unique_ptr<Condition>* out) {
+    Depth depth(&depth_);
+    if (depth.too_deep()) {
+      return Status::Error(ErrorCode::kSyntaxError,
+                           "the statement is nested too deeply");
+    }
     std::unique_ptr<Condition> node(new Condition());
     node->type = ConditionType::kCompare;
     bool parenthesised = false;
